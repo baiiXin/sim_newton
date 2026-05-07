@@ -1,0 +1,92 @@
+# =========================
+# Python cache
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Python build / packaging
+# =========================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# Test / coverage cache
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# OS / editor files
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# ImGui local config
+# =========================
+imgui.ini
+
+# =========================
+# ML / experiment outputs
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.csv
+*.npz
+
+*_eval_log.csv
+*_final.pt
+
+# Common result / output folders
+result/
+results/
+outputs/
+runs/
+logs/
+checkpoints/
+wandb/
+data/
+video/
+
+# Project-specific result folders
+GNN_solver/_src/result/
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.log
+*.bak
+*.swp
