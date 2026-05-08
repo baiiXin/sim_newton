@@ -79,7 +79,7 @@ def build_problem(
     *,
     device: str | torch.device = "auto",
     dtype: torch.dtype = torch.float32,
-    lr: float = 1.0e-2,
+    lr: float = 1.0e-4,
     weight_decay: float = 0.0,
     seed: int = 0,
 ) -> ProblemBundle:
@@ -138,7 +138,7 @@ def build_problem(
         device=device,
     )
 
-    pinned_idx = None # torch.tensor([], dtype=torch.long, device=device)
+    pinned_idx = torch.tensor([0, 1], dtype=torch.long, device=device)
 
     density = 2.0
     mu_value = 10.0
@@ -163,16 +163,19 @@ def build_problem(
     x_hat = compute_x_hat(x_prev, v_prev, dt)
 
     # In this toy case v_prev = 0, so x_hat == x_prev.
-    # In real data these two initial states can differ.
+    # Keep only one initial state so each epoch does not train twice on the
+    # exact same configuration. Add x_hat back only when v_prev is nonzero or
+    # real data makes x_hat meaningfully different from x_prev.
     initial_states = {
         "x_prev": x_prev.clone(),
-        "x_hat": x_hat.clone(),
     }
 
     num_vertices = rest_pos.shape[0]
 
-    # Placeholder nodal mass. Replace with real lumped nodal mass if available.
-    mass = torch.ones(num_vertices, dtype=dtype, device=device) * density
+    # Use the same lumped nodal mass that ImplicitEulerLoss uses internally.
+    # This keeps the GNN input feature consistent with the actual optimization
+    # objective.
+    mass = loss_obj.mass.detach().clone()
 
     # Local material parameters. Here they are constant per node.
     mu_lame = torch.full((num_vertices,), mu_value, dtype=dtype, device=device)
@@ -231,6 +234,8 @@ def init_csv_log(log_path: Path) -> None:
                 "bending",
                 "residual_mean",
                 "residual_max",
+                "delta_norm",
+                "delta_max",
             ]
         )
 
@@ -283,6 +288,8 @@ def append_eval_row(
     iter_id: int,
     losses: Dict[str, Tensor],
     residual: Dict[str, Tensor],
+    delta_norm: Tensor | float = 0.0,
+    delta_max: Tensor | float = 0.0,
 ) -> None:
     def scalar(v):
         if torch.is_tensor(v):
@@ -301,6 +308,8 @@ def append_eval_row(
         scalar(losses["bending"]),
         scalar(residual["mean"]),
         scalar(residual["max"]),
+        scalar(delta_norm),
+        scalar(delta_max),
     ]
 
     with log_path.open("a", newline="") as f:
@@ -314,7 +323,9 @@ def append_eval_row(
         f"iter={iter_id:02d} "
         f"loss={row[4]:.8e} "
         f"res_mean={row[9]:.8e} "
-        f"res_max={row[10]:.8e}",
+        f"res_max={row[10]:.8e} "
+        f"delta_norm={row[11]:.8e} "
+        f"delta_max={row[12]:.8e}",
         flush=True,
     )
 
@@ -362,7 +373,8 @@ def evaluate_15_iterations(
         For each initial value:
           - optionally log iteration 0, i.e. direct loss/residual of the initial value,
           - then iterate test_iters times,
-          - after each iteration, compute total loss and residual, then print and log.
+          - after each iteration, compute total loss, residual, and delta norms,
+            then print and log.
 
     With include_iter0=True and test_iters=15, CSV contains iter=0,1,...,15.
     """
@@ -383,6 +395,8 @@ def evaluate_15_iterations(
                 iter_id=0,
                 losses=losses,
                 residual=residual,
+                delta_norm=0.0,
+                delta_max=0.0,
             )
 
         for iter_id in range(1, test_iters + 1):
@@ -399,6 +413,8 @@ def evaluate_15_iterations(
                     dt=bundle.dt,
                     pinned_idx=bundle.pinned_idx,
                 )
+                delta_norm = torch.linalg.norm(delta_x)
+                delta_max = torch.linalg.norm(delta_x, dim=-1).max()
                 x_cur = x_cur + delta_x
                 x_cur = clamp_pinned_vertices(x_cur, bundle.x_prev, bundle.pinned_idx)
 
@@ -412,6 +428,8 @@ def evaluate_15_iterations(
                 iter_id=iter_id,
                 losses=losses,
                 residual=residual,
+                delta_norm=delta_norm,
+                delta_max=delta_max,
             )
 
     solver.train()
