@@ -33,6 +33,21 @@ The goal of this project is to test whether a GNN can act as an iterative solver
 - Evaluation must record `iter=0`.
 - Training scripts must save both eval logs and train loss logs.
 
+
+## GNN iterative-solver training guidance
+
+When modifying multi-iteration training or evaluation, keep the distinction between an iterative optimizer and a one-step predictor explicit:
+
+- The desired solver behavior is stable iterative energy reduction, not only one-step movement toward a low-energy state.
+- Multi-step training should make gradient flow intentional and explicit. If each solver iteration has its own optimizer step, detach the rollout state before the next iteration so gradients from later iterations do not backpropagate through previous updates. If training through the full unrolled time step, document that choice and watch for exploding, vanishing, or conflicting gradients.
+- Add or preserve diagnostics for:
+  - near-optimum zero-step behavior, i.e. `delta_x` should shrink near a converged solution;
+  - descent-direction statistics, e.g. whether `grad(E)^T delta_x < 0`;
+  - energy after every iteration, including `iter=0`;
+  - line-search or step-size ablations when direction quality and step length need to be separated.
+- Prefer staged/curriculum experiments before long fully-unrolled training runs, for example single-step training before 2-step, 4-step, and 10-step training.
+- If adding teacher supervision experiments, compare against simple gradient-descent and Newton-style directions before changing the network architecture.
+
 ## Validation before PR
 
 Before opening a PR, run at least:

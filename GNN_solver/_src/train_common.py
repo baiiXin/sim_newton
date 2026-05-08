@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
@@ -669,30 +670,38 @@ def run_experiment(
     seed: int = 0,
     test_every: int = 100,
     initial_eval: bool = True,
+    output_dir: Path | str | None = None,
+    dtype: torch.dtype = torch.float32,
 ) -> None:
     """
     Run a full experiment.
 
     Evaluation logs are written to:
-        {experiment_name}_eval_log.csv
+        {output_dir}/{experiment_name}_eval_log.csv
 
     Per-epoch training losses are written to:
-        {experiment_name}_train_loss_log.csv
+        {output_dir}/{experiment_name}_train_loss_log.csv
 
     Checkpoints are written to:
-        {experiment_name}_final.pt
+        {output_dir}/{experiment_name}_final.pt
+
+    When output_dir is None, files are written to the current working directory
+    to preserve existing training script output naming.
     """
     bundle = build_problem(
         device=device,
-        dtype=torch.float32,
+        dtype=dtype,
         lr=lr,
         weight_decay=weight_decay,
         seed=seed,
     )
 
-    log_path = Path(f"{experiment_name}_eval_log.csv")
-    train_loss_log_path = Path(f"{experiment_name}_train_loss_log.csv")
-    checkpoint_path = Path(f"{experiment_name}_final.pt")
+    output_root = Path(".") if output_dir is None else Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    log_path = output_root / f"{experiment_name}_eval_log.csv"
+    train_loss_log_path = output_root / f"{experiment_name}_train_loss_log.csv"
+    checkpoint_path = output_root / f"{experiment_name}_final.pt"
 
     init_csv_log(log_path)
     init_train_loss_log(train_loss_log_path)
@@ -724,3 +733,161 @@ def run_experiment(
 
     save_checkpoint(bundle, checkpoint_path, experiment_name=experiment_name)
     print(f"\nSaved checkpoint to: {checkpoint_path}", flush=True)
+
+
+def build_curriculum_iteration_phases(
+    *,
+    total_epochs: int,
+    curriculum_every: int = 1_000,
+    start_train_iters: int = 1,
+    max_train_iters: Optional[int] = None,
+) -> List[PhaseConfig]:
+    """
+    Build iteration-backward curriculum phases.
+
+    The first phase trains with train_iters=start_train_iters. After each
+    curriculum_every epochs, train_iters increases by one. Each solver iteration
+    still uses its own backward/optimizer.step, so rollout state is detached
+    before the next iteration by train_phase_iteration_backward.
+    """
+    if total_epochs <= 0:
+        raise ValueError("total_epochs must be positive")
+    if curriculum_every <= 0:
+        raise ValueError("curriculum_every must be positive")
+    if start_train_iters <= 0:
+        raise ValueError("start_train_iters must be positive")
+    if max_train_iters is not None and max_train_iters < start_train_iters:
+        raise ValueError("max_train_iters must be >= start_train_iters")
+
+    phases: List[PhaseConfig] = []
+    remaining_epochs = total_epochs
+    phase_index = 0
+
+    while remaining_epochs > 0:
+        phase_epochs = min(curriculum_every, remaining_epochs)
+        train_iters = start_train_iters + phase_index
+        if max_train_iters is not None:
+            train_iters = min(train_iters, max_train_iters)
+
+        phases.append(
+            PhaseConfig(
+                phase=f"curriculum_iter_{train_iters:02d}",
+                num_epochs=phase_epochs,
+                train_iters=train_iters,
+                backward_mode="iteration",
+            )
+        )
+
+        remaining_epochs -= phase_epochs
+        phase_index += 1
+
+    return phases
+
+
+def run_curriculum_iteration_experiment(
+    *,
+    experiment_name: str = "exp_curriculum_iter_every1000",
+    total_epochs: int = 10_000,
+    curriculum_every: int = 1_000,
+    start_train_iters: int = 1,
+    max_train_iters: Optional[int] = None,
+    device: str = "auto",
+    lr: float = 1.0e-4,
+    weight_decay: float = 0.0,
+    seed: int = 0,
+    test_every: int = 100,
+    initial_eval: bool = True,
+    output_dir: Path | str | None = None,
+) -> None:
+    """
+    Run curriculum multi-step training and write results under _src/result.
+
+    Default schedule for 10_000 epochs:
+        epochs 0001-1000: train_iters=1
+        epochs 1001-2000: train_iters=2
+        ...
+        epochs 9001-10000: train_iters=10
+    """
+    if output_dir is None:
+        output_dir = Path(__file__).resolve().parent / "result"
+
+    phases = build_curriculum_iteration_phases(
+        total_epochs=total_epochs,
+        curriculum_every=curriculum_every,
+        start_train_iters=start_train_iters,
+        max_train_iters=max_train_iters,
+    )
+
+    print("Curriculum iteration schedule:", flush=True)
+    for phase in phases:
+        print(
+            f"  {phase.phase}: epochs={phase.num_epochs}, "
+            f"train_iters={phase.train_iters}, mode={phase.backward_mode}",
+            flush=True,
+        )
+
+    run_experiment(
+        experiment_name=experiment_name,
+        phases=phases,
+        device=device,
+        lr=lr,
+        weight_decay=weight_decay,
+        seed=seed,
+        test_every=test_every,
+        initial_eval=initial_eval,
+        output_dir=output_dir,
+    )
+
+
+def parse_curriculum_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run curriculum iteration-backward training. The number of "
+            "training solver iterations starts at 1 and increases every "
+            "--curriculum-every epochs."
+        )
+    )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="'auto', 'cpu', 'cuda', or e.g. 'cuda:0'",
+    )
+    parser.add_argument("--lr", type=float, default=1.0e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--test-every", type=int, default=100)
+    parser.add_argument("--no-initial-eval", action="store_true")
+    parser.add_argument("--experiment-name", default="exp_curriculum_iter_every1000")
+    parser.add_argument("--total-epochs", type=int, default=10_000)
+    parser.add_argument("--curriculum-every", type=int, default=1_000)
+    parser.add_argument("--start-train-iters", type=int, default=1)
+    parser.add_argument("--max-train-iters", type=int, default=None)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "result",
+        help="Directory for eval logs, train loss logs, and checkpoints.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_curriculum_args()
+    run_curriculum_iteration_experiment(
+        experiment_name=args.experiment_name,
+        total_epochs=args.total_epochs,
+        curriculum_every=args.curriculum_every,
+        start_train_iters=args.start_train_iters,
+        max_train_iters=args.max_train_iters,
+        device=args.device,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        seed=args.seed,
+        test_every=args.test_every,
+        initial_eval=not args.no_initial_eval,
+        output_dir=args.output_dir,
+    )
+
+
+if __name__ == "__main__":
+    main()
