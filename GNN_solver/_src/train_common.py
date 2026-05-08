@@ -16,6 +16,20 @@ from GNN_solver import GNNIterationSolver
 BackwardMode = Literal["iteration", "time_step"]
 
 
+def parse_torch_dtype(dtype: str | torch.dtype) -> torch.dtype:
+    """Parse a user-facing dtype string into a torch dtype."""
+    if isinstance(dtype, torch.dtype):
+        return dtype
+
+    normalized = dtype.lower().replace("torch.", "")
+    if normalized in {"float32", "fp32", "single"}:
+        return torch.float32
+    if normalized in {"float64", "fp64", "double"}:
+        return torch.float64
+
+    raise ValueError(f"Unsupported dtype {dtype!r}; expected float32 or float64")
+
+
 @dataclass
 class PhaseConfig:
     phase: str
@@ -65,6 +79,82 @@ def clamp_pinned_vertices(x: Tensor, reference_x: Tensor, pinned_idx: Optional[T
     return x
 
 
+def make_free_vertex_mask(num_vertices: int, pinned_idx: Optional[Tensor], *, device: torch.device) -> Tensor:
+    """Return a boolean mask selecting vertices that are not pinned."""
+    free_mask = torch.ones(num_vertices, dtype=torch.bool, device=device)
+    if pinned_idx is not None:
+        free_mask[pinned_idx.to(device=device)] = False
+    return free_mask
+
+
+def _zero_scalar_like(reference: Tensor) -> Tensor:
+    return torch.zeros((), dtype=reference.dtype, device=reference.device)
+
+
+def _max_vertex_norm(values: Tensor, mask: Tensor) -> Tensor:
+    if not bool(torch.any(mask).item()):
+        return _zero_scalar_like(values)
+    return torch.linalg.norm(values[mask], dim=-1).max()
+
+
+def compute_iteration_diagnostics(
+    *,
+    x_input: Tensor,
+    x_init: Tensor,
+    delta_x: Tensor,
+    prev_delta_x: Optional[Tensor],
+    pinned_idx: Optional[Tensor],
+) -> Dict[str, Tensor]:
+    """
+    Compute diagnostics that reveal whether rollout inputs and deltas change.
+
+    Existing delta_norm/delta_max are intentionally kept for backward-compatible
+    log reading, while these fields separate free/pinned vertices and compare
+    each delta with the previous solver iteration.
+    """
+    free_mask = make_free_vertex_mask(
+        x_input.shape[0],
+        pinned_idx,
+        device=x_input.device,
+    )
+    pinned_mask = ~free_mask
+    has_free = bool(torch.any(free_mask).item())
+    has_pinned = bool(torch.any(pinned_mask).item())
+
+    input_offset = x_input - x_init
+    if prev_delta_x is None:
+        delta_change = torch.zeros_like(delta_x)
+    else:
+        delta_change = delta_x - prev_delta_x
+
+    return {
+        "x_input_norm": torch.linalg.norm(input_offset),
+        "x_free_input_norm": (
+            torch.linalg.norm(input_offset[free_mask])
+            if has_free
+            else _zero_scalar_like(x_input)
+        ),
+        "delta_free_norm": (
+            torch.linalg.norm(delta_x[free_mask])
+            if has_free
+            else _zero_scalar_like(delta_x)
+        ),
+        "delta_free_max": _max_vertex_norm(delta_x, free_mask),
+        "delta_pinned_norm": (
+            torch.linalg.norm(delta_x[pinned_mask])
+            if has_pinned
+            else _zero_scalar_like(delta_x)
+        ),
+        "delta_pinned_max": _max_vertex_norm(delta_x, pinned_mask),
+        "delta_change_norm": torch.linalg.norm(delta_change),
+        "delta_change_max": (
+            torch.linalg.norm(delta_change, dim=-1).max()
+            if delta_change.numel() > 0
+            else _zero_scalar_like(delta_x)
+        ),
+    }
+
+
 def compute_x_hat(x_prev: Tensor, v_prev: Tensor, dt: Tensor) -> Tensor:
     """
     Inertial prediction used as a fixed input feature during one time step.
@@ -90,6 +180,7 @@ def build_problem(
     """
     torch.manual_seed(seed)
 
+    dtype = parse_torch_dtype(dtype)
     device = resolve_device(device) if isinstance(device, str) else torch.device(device)
 
     rest_pos = torch.tensor(
@@ -236,6 +327,14 @@ def init_csv_log(log_path: Path) -> None:
                 "residual_max",
                 "delta_norm",
                 "delta_max",
+                "x_input_norm",
+                "x_free_input_norm",
+                "delta_free_norm",
+                "delta_free_max",
+                "delta_pinned_norm",
+                "delta_pinned_max",
+                "delta_change_norm",
+                "delta_change_max",
             ]
         )
 
@@ -290,6 +389,14 @@ def append_eval_row(
     residual: Dict[str, Tensor],
     delta_norm: Tensor | float = 0.0,
     delta_max: Tensor | float = 0.0,
+    x_input_norm: Tensor | float = 0.0,
+    x_free_input_norm: Tensor | float = 0.0,
+    delta_free_norm: Tensor | float = 0.0,
+    delta_free_max: Tensor | float = 0.0,
+    delta_pinned_norm: Tensor | float = 0.0,
+    delta_pinned_max: Tensor | float = 0.0,
+    delta_change_norm: Tensor | float = 0.0,
+    delta_change_max: Tensor | float = 0.0,
 ) -> None:
     def scalar(v):
         if torch.is_tensor(v):
@@ -310,6 +417,14 @@ def append_eval_row(
         scalar(residual["max"]),
         scalar(delta_norm),
         scalar(delta_max),
+        scalar(x_input_norm),
+        scalar(x_free_input_norm),
+        scalar(delta_free_norm),
+        scalar(delta_free_max),
+        scalar(delta_pinned_norm),
+        scalar(delta_pinned_max),
+        scalar(delta_change_norm),
+        scalar(delta_change_max),
     ]
 
     with log_path.open("a", newline="") as f:
@@ -325,7 +440,15 @@ def append_eval_row(
         f"res_mean={row[9]:.8e} "
         f"res_max={row[10]:.8e} "
         f"delta_norm={row[11]:.8e} "
-        f"delta_max={row[12]:.8e}",
+        f"delta_max={row[12]:.8e} "
+        f"x_input_norm={row[13]:.8e} "
+        f"x_free_input_norm={row[14]:.8e} "
+        f"delta_free_norm={row[15]:.8e} "
+        f"delta_free_max={row[16]:.8e} "
+        f"delta_pinned_norm={row[17]:.8e} "
+        f"delta_pinned_max={row[18]:.8e} "
+        f"delta_change_norm={row[19]:.8e} "
+        f"delta_change_max={row[20]:.8e}",
         flush=True,
     )
 
@@ -384,6 +507,7 @@ def evaluate_15_iterations(
     for init_name, x_init in bundle.initial_states.items():
         x_cur = x_init.clone()
         x_cur = clamp_pinned_vertices(x_cur, bundle.x_prev, bundle.pinned_idx)
+        prev_delta_x: Optional[Tensor] = None
 
         if include_iter0:
             losses, residual = _compute_losses_and_residual(bundle=bundle, x=x_cur)
@@ -401,6 +525,7 @@ def evaluate_15_iterations(
 
         for iter_id in range(1, test_iters + 1):
             with torch.no_grad():
+                x_input = x_cur.clone()
                 delta_x = solver(
                     x_cur=x_cur,
                     x_hat=bundle.x_hat,
@@ -415,8 +540,16 @@ def evaluate_15_iterations(
                 )
                 delta_norm = torch.linalg.norm(delta_x)
                 delta_max = torch.linalg.norm(delta_x, dim=-1).max()
+                diagnostics = compute_iteration_diagnostics(
+                    x_input=x_input,
+                    x_init=x_init,
+                    delta_x=delta_x,
+                    prev_delta_x=prev_delta_x,
+                    pinned_idx=bundle.pinned_idx,
+                )
                 x_cur = x_cur + delta_x
                 x_cur = clamp_pinned_vertices(x_cur, bundle.x_prev, bundle.pinned_idx)
+                prev_delta_x = delta_x.detach().clone()
 
             losses, residual = _compute_losses_and_residual(bundle=bundle, x=x_cur)
 
@@ -430,6 +563,7 @@ def evaluate_15_iterations(
                 residual=residual,
                 delta_norm=delta_norm,
                 delta_max=delta_max,
+                **diagnostics,
             )
 
     solver.train()
@@ -689,7 +823,7 @@ def run_experiment(
     test_every: int = 100,
     initial_eval: bool = True,
     output_dir: Path | str | None = None,
-    dtype: torch.dtype = torch.float32,
+    dtype: str | torch.dtype = torch.float32,
 ) -> None:
     """
     Run a full experiment.
@@ -706,6 +840,8 @@ def run_experiment(
     When output_dir is None, files are written to the current working directory
     to preserve existing training script output naming.
     """
+    dtype = parse_torch_dtype(dtype)
+
     bundle = build_problem(
         device=device,
         dtype=dtype,
@@ -725,6 +861,7 @@ def run_experiment(
     init_train_loss_log(train_loss_log_path)
 
     print(f"Device: {bundle.device}", flush=True)
+    print(f"Dtype: {bundle.dtype}", flush=True)
     print(f"Evaluation log: {log_path.resolve()}", flush=True)
     print(f"Train loss log: {train_loss_log_path.resolve()}", flush=True)
     print(f"Checkpoint: {checkpoint_path.resolve()}", flush=True)
@@ -816,6 +953,7 @@ def run_curriculum_iteration_experiment(
     test_every: int = 100,
     initial_eval: bool = True,
     output_dir: Path | str | None = None,
+    dtype: str | torch.dtype = torch.float32,
 ) -> None:
     """
     Run curriculum multi-step training and write results under _src/result.
@@ -854,6 +992,7 @@ def run_curriculum_iteration_experiment(
         test_every=test_every,
         initial_eval=initial_eval,
         output_dir=output_dir,
+        dtype=dtype,
     )
 
 
@@ -881,6 +1020,12 @@ def parse_curriculum_args() -> argparse.Namespace:
     parser.add_argument("--start-train-iters", type=int, default=1)
     parser.add_argument("--max-train-iters", type=int, default=None)
     parser.add_argument(
+        "--dtype",
+        choices=("float32", "float64"),
+        default="float32",
+        help="Floating point dtype for the loss, model, and rollout tensors.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "result",
@@ -904,6 +1049,7 @@ def main() -> None:
         test_every=args.test_every,
         initial_eval=not args.no_initial_eval,
         output_dir=args.output_dir,
+        dtype=args.dtype,
     )
 
 

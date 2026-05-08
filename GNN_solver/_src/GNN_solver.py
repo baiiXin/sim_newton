@@ -479,8 +479,11 @@ class IterativeDeltaGNN(nn.Module):
         Returns:
             delta_x: [N, 3]
         """
-        # Project convention: float32.
-        x_cur = x_cur.to(dtype=torch.float32)
+        # Preserve the caller-selected floating dtype, e.g. float64 for
+        # numerical diagnostics. Feature builders cast auxiliary tensors to
+        # this dtype below.
+        if not x_cur.dtype.is_floating_point:
+            x_cur = x_cur.to(dtype=torch.get_default_dtype())
         x_hat = x_hat.to(dtype=x_cur.dtype, device=x_cur.device)
         rest_pos = rest_pos.to(dtype=x_cur.dtype, device=x_cur.device)
         edge_index = edge_index.to(device=x_cur.device)
@@ -598,7 +601,7 @@ class GNNIterationSolver(nn.Module):
 
 if __name__ == "__main__":
     device = "cpu"
-    dtype = torch.float32
+    dtype = torch.float64
 
     rest_pos = torch.tensor(
         [
