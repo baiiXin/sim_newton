@@ -51,9 +51,9 @@ class ImplicitEulerLoss:
         if torch.is_tensor(rest_pos):
             rest_pos = rest_pos.clone()
             if not rest_pos.dtype.is_floating_point:
-                rest_pos = rest_pos.float()
+                rest_pos = rest_pos.to(dtype=torch.get_default_dtype())
         else:
-            rest_pos = torch.tensor(rest_pos, dtype=torch.float32)
+            rest_pos = torch.tensor(rest_pos, dtype=torch.get_default_dtype())
 
         self.device = rest_pos.device
         self.dtype = rest_pos.dtype

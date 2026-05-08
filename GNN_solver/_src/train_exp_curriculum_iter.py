@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from train_common import PhaseConfig, run_experiment
 
 
@@ -28,6 +30,7 @@ WEIGHT_DECAY = 0.0
 SEED = 0
 TEST_EVERY = 100
 INITIAL_EVAL = True
+DTYPE = torch.float64
 
 # Save all results to GNN_solver/_src/result
 OUTPUT_DIR = Path(__file__).resolve().parent / "result"
@@ -74,6 +77,7 @@ def main() -> None:
     print("Curriculum iteration-backward experiment")
     print(f"Experiment name: {EXPERIMENT_NAME}")
     print(f"Output dir: {OUTPUT_DIR}")
+    print(f"Dtype: {DTYPE}")
     print("Schedule:")
     for phase in phases:
         print(
@@ -93,6 +97,7 @@ def main() -> None:
         test_every=TEST_EVERY,
         initial_eval=INITIAL_EVAL,
         output_dir=OUTPUT_DIR,
+        dtype=DTYPE,
     )
 
 
