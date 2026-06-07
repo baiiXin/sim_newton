@@ -79,6 +79,8 @@ checkpoints/
 wandb/
 data/
 video/
+ablation_outputs/
+results_*/
 
 # Project-specific result folders
 GNN_solver/_src/result/

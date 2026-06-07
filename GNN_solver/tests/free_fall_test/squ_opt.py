@@ -44,7 +44,7 @@ def main():
     meta_opt = torch.optim.Adam(mlp.parameters(), lr=5e-4)
     
     # 训练配置
-    epochs = 600
+    epochs = 1000
     unroll_steps = 1  # 初始展开步数
     train_loss_log = []
     eval_log = []
@@ -74,12 +74,12 @@ def main():
         for _ in range(unroll_steps):
             delta = mlp(x, target)
             # 关键：不同迭代间 detach 切断计算图，防止图爆炸并模拟在线优化器行为
-            x = x.detach() + delta  
-            
-        loss = objective(x, target)
-        loss.backward()  # 每次 epoch 仅反向传播一次
-        meta_opt.step()
-        train_loss_log.append(loss.item())
+            x = x + delta  
+            loss = objective(x, target)
+            loss.backward()  # 每次 epoch 仅反向传播一次
+            meta_opt.step()
+            train_loss_log.append(loss.item())
+            x = x.detach()
         
         # 每100 epoch 评估一次
         if epoch % 100 == 0 or epoch == epochs - 1:

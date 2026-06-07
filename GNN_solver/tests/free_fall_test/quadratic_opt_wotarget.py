@@ -11,15 +11,15 @@ class MLPOptimizer(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(6, 64),
+            nn.Linear(3, 64),
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),
             nn.Linear(64, 3)  # 输出更新步长 delta
         )
         
-    def forward(self, x, t):
-        return self.net(torch.cat([x, t], dim=-1))
+    def forward(self, x):
+        return self.net(x)
 
 def objective(x, t):
     return torch.sum((x - t) ** 2)
@@ -33,13 +33,13 @@ def main():
     
     # 固定初值与目标点
     x0 = torch.tensor([3., 4., 5.])
-    t0 = torch.tensor([0., 0., 0.])
+    t0 = torch.tensor([5., 4., 3.])
     
     mlp = MLPOptimizer()
     opt = torch.optim.Adam(mlp.parameters(), lr=1e-3)
     
     # 训练配置
-    epochs = 800          # epoch取长一点
+    epochs = 1000          # epoch取长一点
     K = 1                 # 初始迭代次数
     train_log = []        # 记录每个epoch的最终Loss
     eval_log = []         # 每100 epoch的评估记录
@@ -49,14 +49,14 @@ def main():
     
     for epoch in range(epochs):
         # 每100个epoch增加一次迭代展开次数
-        if epoch > 0 and epoch % 100 == 0:
+        if epoch > 0 and epoch % 100 == 0 and K < 10:
             K += 1
             
         x = x0.clone()  # 每个epoch从固定初值重新开始，学习稳定轨迹
         
         # === 严格遵循您的伪代码 ===
         for k in range(K):
-            delta = mlp(x, t0)           # 前向：网络预测步长
+            delta = mlp(x)           # 前向：网络预测步长
             x = x + delta                # 应用更新
             loss = objective(x, t0)      # 计算当前Loss
             loss.backward()              # 梯度回传至MLP参数
@@ -73,7 +73,7 @@ def main():
             eval_steps = []
             for i in range(10):
                 with torch.no_grad():
-                    d = mlp(x_eval, t0)
+                    d = mlp(x_eval)
                 x_eval = x_eval + d
                 l = objective(x_eval, t0).item()
                 eval_steps.append({"step": i+1, "x": x_eval.tolist(), "loss": l})
@@ -100,7 +100,7 @@ def main():
     for i in range(max_steps):
         # MLP 迭代
         with torch.no_grad():
-            d_m = mlp(x_mlp, t0)
+            d_m = mlp(x_mlp)
         x_mlp = x_mlp + d_m
         l_m = objective(x_mlp, t0).item()
         mlp_hist["iterations"].append({"step": i+1, "x": x_mlp.tolist(), "loss": l_m})
@@ -167,7 +167,7 @@ def main():
     mlp_norms, newton_norms = [], []
     x_mlp, x_new = x0.clone(), x0.clone()
     for _ in range(max_steps):
-        with torch.no_grad(): d_m = mlp(x_mlp, t0)
+        with torch.no_grad(): d_m = mlp(x_mlp)
         mlp_norms.append(torch.norm(d_m).item())
         x_mlp += d_m
         d_n = t0 - x_new
