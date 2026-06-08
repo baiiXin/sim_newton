@@ -530,7 +530,7 @@ def main():
     # --------------------------------------------------------
 
     mlp = MLPOptimizer()
-    opt = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+    opt = torch.optim.SGD(mlp.parameters(), lr=1e-5)
 
     epochs = 1000
     K = 1
