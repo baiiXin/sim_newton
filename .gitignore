@@ -81,8 +81,10 @@ data/
 video/
 ablation_outputs/
 results_*/
+mlp_optimizer_*/
+full_*_experiment/
 
-# Project-specific result folders
+## Project-specific result folders
 GNN_solver/_src/result/
 
 # =========================
