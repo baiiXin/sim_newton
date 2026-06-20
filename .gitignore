@@ -83,6 +83,8 @@ ablation_outputs/
 results_*/
 mlp_optimizer_*/
 full_*_experiment/
+freefall_mlp_*/
+free_fall_*/
 
 ## Project-specific result folders
 GNN_solver/_src/result/
