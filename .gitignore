@@ -85,6 +85,18 @@ mlp_optimizer_*/
 full_*_experiment/
 freefall_mlp_*/
 free_fall_*/
+fixed_*/
+multi_motion_spring_optimizer/
+projectile_*/
+continuous_*/
+multi_motion_spring_*/
+multi_step_spring_*/
+multistep_independent_*/
+spring_multistep_residual_stable/
+two_particle_*/
+two_point_*/
+five_particle_*/
+# =========================
 
 ## Project-specific result folders
 GNN_solver/_src/result/
