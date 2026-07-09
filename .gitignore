@@ -96,6 +96,12 @@ spring_multistep_residual_stable/
 two_particle_*/
 two_point_*/
 five_particle_*/
+
+scaled_cloth_evaluations/
+scaled_cloth_runs/
+scaled_data/
+scaled_databaseline_results/
+
 # =========================
 
 ## Project-specific result folders
