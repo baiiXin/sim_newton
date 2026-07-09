@@ -130,7 +130,7 @@ DEFAULT_TOTAL_TIME_STEPS = 500
 DEFAULT_TRAIN_POINTS_PER_PROBLEM = 32
 DEFAULT_EVAL_POINTS_PER_PROBLEM = 128
 DEFAULT_EPOCHS = 500
-DEFAULT_VALIDATION_INTERVAL = 200
+DEFAULT_VALIDATION_INTERVAL = 50
 DEFAULT_DIAGNOSTIC_INTERVAL = 200
 DEFAULT_EVALUATION_STEPS = 50
 DEFAULT_EVALUATION_BATCH_SIZE = 8192
@@ -145,7 +145,6 @@ DEFAULT_SAMPLING_RADIUS_MAX = 1e-1
 LEGACY_TRAIN_TIME_INDICES = (0, 5, 11, 16, 21, 26, 32, 37, 42, 47, 53, 58, 63, 68, 74, 79)
 # Dataset time splits for the 500-step pipeline are built in cloth02_dataset_catalog.py.
 TRAIN_TIME_INDICES = tuple(range(0, 400))
-SEEN_INTERPOLATION_TIME_INDICES = ()
 SEEN_EXTRAPOLATION_TIME_INDICES = tuple(range(400, 500))
 VALIDATION_TIME_INDICES = tuple(range(0, 500, 10))
 UNSEEN_TEST_TIME_INDICES = tuple(range(0, 500, 10))
@@ -156,12 +155,17 @@ MOTION_SOBOL_SEED_VALIDATION = 20260701
 MOTION_SOBOL_SEED_ID_TEST = 20260702
 TRAIN_SOBOL_SEED = 20260620
 VALIDATION_SOBOL_SEED = 20260621
-SEEN_INTERPOLATION_TEST_SOBOL_SEED = 20260622
 SEEN_EXTRAPOLATION_TEST_SOBOL_SEED = 20260623
 UNSEEN_ID_TEST_SOBOL_SEED = 20260624
 OOD_TEST_SOBOL_SEED = 20260625
 
 GD_CANDIDATE_STEP_SIZES = (
+    1e-8,
+    2e-8,
+    5e-8,
+    1e-7,
+    2e-7,
+    5e-7,
     1e-6,
     2e-6,
     5e-6,
@@ -169,6 +173,40 @@ GD_CANDIDATE_STEP_SIZES = (
     2e-5,
     5e-5,
     1e-4,
+    2e-4,
+    5e-4,
+    1e-3,
+)
+
+ADAM_CANDIDATE_LRS = (
+    1e-5,
+    2e-5,
+    5e-5,
+    1e-4,
+    2e-4,
+    5e-4,
+    1e-3,
+    2e-3,
+    5e-3,
+    1e-2,
+    2e-2,
+    5e-2,
+    1e-1,
+)
+
+LBFGS_CANDIDATES = (
+    {"learning_rate": 0.05, "history_size": 10},
+    {"learning_rate": 0.10, "history_size": 10},
+    {"learning_rate": 0.25, "history_size": 10},
+    {"learning_rate": 0.50, "history_size": 10},
+    {"learning_rate": 1.00, "history_size": 10},
+    {"learning_rate": 2.00, "history_size": 10},
+    {"learning_rate": 0.50, "history_size": 5},
+    {"learning_rate": 0.50, "history_size": 20},
+    {"learning_rate": 1.00, "history_size": 5},
+    {"learning_rate": 1.00, "history_size": 20},
+    {"learning_rate": 1.00, "history_size": 50},
+    {"learning_rate": 2.00, "history_size": 20},
 )
 
 PLOT_FLOOR = 1e-16

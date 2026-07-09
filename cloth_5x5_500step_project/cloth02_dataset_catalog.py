@@ -229,7 +229,10 @@ def build_all_datasets(
         time_steps_per_motion=time_steps_per_motion_batch,
     )
     batch_plan = {
-        "meaning": "one mini-batch = all 16 train motions x a window of time-step problems",
+        "meaning": (
+            "one mini-batch = all 16 train motions x time_steps_per_motion_batch "
+            "time-step problems per motion; each problem uses all sampled initial states"
+        ),
         "train_motion_indices": list(TRAIN_MOTIONS),
         "train_time_range": [0, train_time_stop - 1],
         "time_steps_per_motion_batch": time_steps_per_motion_batch,

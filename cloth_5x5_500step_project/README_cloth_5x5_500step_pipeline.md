@@ -10,10 +10,13 @@
 - 网络输入：`[current residual, previous residual, previous update] = 3×75D = 225D`。
 - 网络输出：`75D` 位移更新。
 - 固定点处理：网络输出后对固定点位移 gate 为 0，并 hard projection 到固定位置。
-- 时间长度：每个 motion `500` 个物理时间步。
+- 时间长度：每个 motion `500` 个物理时间步，即 `total_time_steps = 500`。
 - motion 数量：`32` 个。
+- 每个 time-step problem 的采样初值数：`points_per_problem = 32`。
 - 训练时间：train motion 的 `0–399` 每个时间步都参与训练。
 - seen extrapolation：train motion 的 `400–499`。
+- 训练 epoch：`500`。
+- 验证间隔：`50` epoch，默认在 epoch `1, 50, 100, ..., 500` 验证。
 - 默认精度：`torch.float64`。
 - 默认设备：`cuda:0`。
 
@@ -101,7 +104,7 @@ cloth_5x5_500step_pipeline/
 │       ├── baseline_adam/
 │       ├── baseline_lbfgs/
 │       ├── baseline_newton/
-│       └── <model_name>/
+│       └── model_<model_name>/
 └── renders/
     ├── rollouts/
     └── reference_motions/
@@ -249,6 +252,26 @@ Newton
 - L-BFGS：选择 learning rate 和 history size。
 - Newton：无参数选择。
 
+默认候选范围：
+
+```text
+GD step_size:
+1e-8, 2e-8, 5e-8, 1e-7, 2e-7, 5e-7,
+1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5,
+1e-4, 2e-4, 5e-4, 1e-3
+
+Adam learning_rate:
+1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4,
+1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1
+
+L-BFGS:
+(lr=0.05, h=10), (lr=0.10, h=10), (lr=0.25, h=10),
+(lr=0.50, h=10), (lr=1.00, h=10), (lr=2.00, h=10),
+(lr=0.50, h=5),  (lr=0.50, h=20),
+(lr=1.00, h=5),  (lr=1.00, h=20), (lr=1.00, h=50),
+(lr=2.00, h=20)
+```
+
 然后在以下数据集上统一评估：
 
 ```text
@@ -312,7 +335,7 @@ bias: False
 
 ```text
 epochs = 500
-validation_interval = 200
+validation_interval = 50
 optimizer = Adam
 learning_rate = 1e-3
 gradient_clip_norm = 10
@@ -320,11 +343,13 @@ k_values = 1, 3, 5, 10, 30
 epochs_per_k = 100
 ```
 
+默认会在 epoch `1, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500` 附近进行验证。
+
 训练 batch 规则：
 
 ```text
 一个 mini-batch = 16 个 train motion × 每个 motion 32 个 time-step problems
-每个 time-step problem 使用它的全部采样初值
+每个 time-step problem 使用它的全部采样初值，默认也就是 32 个 sampled states
 每个 epoch 覆盖完整 train set
 ```
 
@@ -442,7 +467,7 @@ rollouts/motion_003/
 ├── baseline_adam/
 ├── baseline_lbfgs/
 ├── baseline_newton/
-└── activation_identity_depth_01_width_0256_no_bias/
+└── model_activation_identity_depth_01_width_0256_no_bias/
     ├── rollout.pt
     ├── metrics.json
     └── status.json
@@ -488,7 +513,7 @@ python cloth08_render_rollouts.py \
 python cloth08_render_rollouts.py \
   --root cloth_5x5_500step_pipeline \
   --motion-index 3 \
-  --solver-names baseline_gd activation_identity_depth_01_width_0256_no_bias \
+  --solver-names baseline_gd model_activation_identity_depth_01_width_0256_no_bias \
   --frame-stride 5 \
   --save-frames \
   --make-video

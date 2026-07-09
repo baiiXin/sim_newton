@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import time
 from pathlib import Path
 from typing import Any
@@ -38,11 +37,12 @@ import torch
 
 from cloth02_dataset_catalog import load_dataset
 from cloth03_solvers_and_models import (
+    ADAM_CANDIDATE_LRS,
     DEFAULT_DEVICE,
     DEFAULT_EVALUATION_BATCH_SIZE,
     DEFAULT_EVALUATION_STEPS,
-    DEFAULT_REPORT_STEPS,
     GD_CANDIDATE_STEP_SIZES,
+    LBFGS_CANDIDATES,
     AdamState,
     apply_adam_update_full,
     apply_gradient_descent_update_full,
@@ -53,13 +53,6 @@ from cloth03_solvers_and_models import (
     stationarity_residual_norm_full,
 )
 
-ADAM_CANDIDATE_LRS = (1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2)
-LBFGS_CANDIDATES = (
-    {"learning_rate": 0.25, "history_size": 10},
-    {"learning_rate": 0.50, "history_size": 10},
-    {"learning_rate": 1.00, "history_size": 10},
-    {"learning_rate": 1.00, "history_size": 20},
-)
 TEST_DATASETS = ("validation", "seen_extrap", "unseen_id", "ood")
 
 

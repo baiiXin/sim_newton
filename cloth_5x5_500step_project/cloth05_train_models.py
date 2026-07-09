@@ -342,6 +342,7 @@ def train_one_model(
         "architecture": model.architecture_description,
         "parameter_count": model.parameter_count,
         "epochs": args.epochs,
+        "validation_interval": args.validation_interval,
         "k_values": args.k_values,
         "epochs_per_k": args.epochs_per_k,
         "learning_rate": args.learning_rate,
