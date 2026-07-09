@@ -102,6 +102,8 @@ scaled_cloth_runs/
 scaled_data/
 scaled_databaseline_results/
 
+max_gpu_memory_test_cuda1/
+max_gpu_memory_no_detach_test_cuda1/
 # =========================
 
 ## Project-specific result folders
