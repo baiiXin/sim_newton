@@ -1,17 +1,14 @@
-# Initial-Point Sampling Ablation
+# 初始点采样数量消融实验
 
-This experiment studies only the number of initial states sampled for each
-motion/time-step problem:
+这个实验只研究每个 motion/time-step problem 采样的初始状态数量：
 
 ```text
 points_per_problem = {1, 8, 32, 64, 128, 1024}
 ```
 
-All other settings are fixed. Every sample-count experiment includes the true
-physical initial state. The remaining states are scrambled Sobol samples around
-the stored reference solution.
+其他设置全部固定。每一种 sample-count 实验都包含真实物理初始状态。其余状态是在已保存 reference solution 周围生成的 scrambled Sobol 采样。
 
-## 1. Files
+## 1. 文件
 
 ```text
 cloth10_prepare_initial_point_ablation.py
@@ -19,23 +16,20 @@ cloth11_train_initial_point_ablation.py
 cloth12_evaluate_initial_point_ablation_rollouts.py
 ```
 
-- `cloth10`: reuses the existing reference trajectories and creates one shared,
-  nested 1024-state sequence for every training problem.
-- `cloth11`: trains one model for each selected prefix length with fixed epoch
-  count, fixed minibatches, and fixed optimizer-update count.
-- `cloth12`: evaluates the selected checkpoints on motions 20-31 with 500-frame
-  continuous rollout and 50 inner iterations per frame.
+- `cloth10`：复用已有 reference trajectories，并为每个训练 problem 创建一条共享的、嵌套的 1024-state 序列。
+- `cloth11`：对每个选定 prefix length 训练一个模型；epoch 数、minibatch 和 optimizer update 次数都固定。
+- `cloth12`：在 motion 20-31 上评估选定 checkpoint，使用 500-frame 连续 rollout，每帧 50 次 inner iteration。
 
-## 2. Data semantics
+## 2. 数据语义
 
-For every training problem, the shared sample axis is:
+对每个训练 problem，共享 sample 轴的含义是：
 
 ```text
-slot 0      : true physical initial state p_n
-slots 1..   : scrambled Sobol states around exact_y
+slot 0      : 真实物理初始状态 p_n
+slots 1..   : exact_y 周围的 scrambled Sobol states
 ```
 
-The ablation sets are nested prefixes:
+消融数据集是嵌套 prefix：
 
 ```text
 points_0001 = slots [0:1]
@@ -46,10 +40,9 @@ points_0128 = slots [0:128]
 points_1024 = slots [0:1024]
 ```
 
-Therefore every experiment contains the physical initial state, and increasing
-sample count only expands the covered initial-state region.
+因此，每个实验都包含物理初始状态；增加 sample count 只是在扩大覆盖的初始状态区域。
 
-The existing files below are reused and are not regenerated:
+下面这些已有文件会被复用，不会重新生成：
 
 ```text
 cloth_5x5_500step_pipeline/data/reference/reference_problems.pt
@@ -57,22 +50,22 @@ cloth_5x5_500step_pipeline/data/reference/reference_motion_states.pt
 cloth_5x5_500step_pipeline/data/reference/runtime_config.json
 ```
 
-## 3. Training semantics
+## 3. 训练语义
 
-The original time-problem minibatch is unchanged:
+原始 time-problem minibatch 保持不变：
 
 ```text
 16 training motions x 32 time steps per motion
 ```
 
-There are 13 optimizer updates per epoch:
+每个 epoch 有 13 次 optimizer update：
 
 ```text
 12 full windows: 16 motions x 32 time steps
 1 tail window : 16 motions x 16 time steps
 ```
 
-For one time-window minibatch, training performs:
+对一个 time-window minibatch，训练流程是：
 
 ```python
 optimizer.zero_grad()
@@ -83,15 +76,15 @@ clip_grad_norm_()
 optimizer.step()
 ```
 
-Consequences:
+这带来的结果是：
 
-- every epoch visits every selected state exactly once;
-- every sample-count experiment has the same number of optimizer updates;
-- the GPU microbatch shape is independent of sample count;
-- CUDA peak memory should stay approximately fixed;
-- total runtime still grows approximately linearly with sample count.
+- 每个 epoch 会且只会访问每个选中的 state 一次；
+- 每个 sample-count 实验拥有相同数量的 optimizer update；
+- GPU microbatch shape 与 sample count 无关；
+- CUDA 峰值显存应基本保持固定；
+- 总运行时间仍然会近似随 sample count 线性增长。
 
-Default model and training settings:
+默认模型和训练设置：
 
 ```text
 activation        = identity
@@ -106,49 +99,46 @@ epochs_per_K      = 100
 validation every  = 50 epochs
 ```
 
-## 4. Validation checkpoint selection
+## 4. 验证 checkpoint 选择
 
-Validation uses the original validation motions:
+验证使用原始 validation motions：
 
 ```text
 motion 16, 17, 18, 19
 ```
 
-For each validation event:
+每次 validation event 运行：
 
 ```text
 4 motions x 300 rollout frames x 15 learned iterations per frame
 ```
 
-Only the residual after the 15th iteration of each frame is used. This gives
-1200 final residuals. The checkpoint selection metric is exactly:
+每帧只使用第 15 次 iteration 后的 residual。这样会得到 1200 个 final residual。checkpoint selection metric 精确定义为：
 
 ```text
-global maximum of the 1200 final residuals
+这 1200 个 final residual 的全局最大值
 ```
 
-The p95 value, each motion's maximum, and the worst frame are saved only for
-diagnostics and do not participate in checkpoint selection.
+p95 值、每个 motion 的最大值以及最差 frame 只用于诊断保存，不参与 checkpoint 选择。
 
-## 5. Test rollout
+## 5. 测试 rollout
 
-The default test motions are all existing motions outside training and
-validation:
+默认 test motions 是训练和验证之外的所有已有 motion：
 
 ```text
 ID test : motion 20-23
 OOD test: motion 24-31
 ```
 
-Each solver is evaluated with:
+每个 solver 的评估设置是：
 
 ```text
 rollout length       = 500 frames
 inner iterations     = 50 per frame
-frame initial state  = the solver's own propagated physical state
+frame initial state  = solver 自己传播得到的物理状态
 ```
 
-For every frame and every model/baseline, the saved curve contains:
+对每个 frame 和每个 model/baseline，保存的 curve 包含：
 
 ```text
 initial_y_by_frame                  # y^(0)
@@ -162,10 +152,9 @@ global_iteration
 global_residual                     # iterations 1..50 flattened, no separators
 ```
 
-The existing reference trajectory is not rerun. Its stored solution and
-residual are plotted only at each frame's iteration-50 endpoint.
+已有 reference trajectory 不会重新运行。它保存的 solution 和 residual 只在每个 frame 的 iteration-50 endpoint 上绘图。
 
-Default comparison lines:
+默认对比曲线：
 
 ```text
 model_points_0001
@@ -181,7 +170,7 @@ baseline_newton
 reference endpoints
 ```
 
-## 6. Output structure
+## 6. 输出结构
 
 ```text
 cloth_5x5_initial_sample_ablation/
@@ -215,11 +204,11 @@ cloth_5x5_initial_sample_ablation/
     └── ...
 ```
 
-## 7. Commands
+## 7. 运行命令
 
-Run from `cloth_5x5_500step_project/`.
+从 `cloth_5x5_500step_project/` 目录运行。
 
-### Prepare the shared nested samples
+### 准备共享的嵌套 samples
 
 ```bash
 python cloth10_prepare_initial_point_ablation.py \
@@ -229,7 +218,7 @@ python cloth10_prepare_initial_point_ablation.py \
   --max-points 1024
 ```
 
-### Smoke-test one small training run
+### 小规模训练 smoke test
 
 ```bash
 python cloth11_train_initial_point_ablation.py \
@@ -244,7 +233,7 @@ python cloth11_train_initial_point_ablation.py \
   --overwrite
 ```
 
-### Train the formal ablation
+### 训练正式消融实验
 
 ```bash
 python cloth11_train_initial_point_ablation.py \
@@ -259,8 +248,7 @@ python cloth11_train_initial_point_ablation.py \
   --resume
 ```
 
-Because runtime grows with sample count, the experiments may also be launched
-separately, for example:
+因为运行时间会随 sample count 增长，实验也可以分开启动，例如：
 
 ```bash
 python cloth11_train_initial_point_ablation.py \
@@ -269,7 +257,7 @@ python cloth11_train_initial_point_ablation.py \
   --resume
 ```
 
-### Smoke-test rollout
+### Rollout smoke test
 
 ```bash
 python cloth12_evaluate_initial_point_ablation_rollouts.py \
@@ -284,7 +272,7 @@ python cloth12_evaluate_initial_point_ablation_rollouts.py \
   --overwrite
 ```
 
-### Run the formal 12-motion rollout evaluation
+### 运行正式的 12-motion rollout evaluation
 
 ```bash
 python cloth12_evaluate_initial_point_ablation_rollouts.py \
@@ -298,7 +286,7 @@ python cloth12_evaluate_initial_point_ablation_rollouts.py \
   --device cuda:0
 ```
 
-### Rebuild plots from saved line data only
+### 只从已保存 line data 重建图
 
 ```bash
 python cloth12_evaluate_initial_point_ablation_rollouts.py \
@@ -310,10 +298,6 @@ python cloth12_evaluate_initial_point_ablation_rollouts.py \
   --plot-only
 ```
 
-## 8. Interpretation warning
+## 8. 解释结果时的注意事项
 
-This design fixes epochs, minibatch definitions, and optimizer-update count. It
-isolates initial-state coverage more cleanly than feeding all states in one huge
-batch. However, it does not fix total floating-point work: the 1024-point model
-performs roughly 32 times as many sample-slot forward/backward passes per epoch
-as the 32-point model. Report both performance and wall-clock cost.
+这个设计固定了 epochs、minibatch 定义和 optimizer-update 次数。相比把所有 states 放进一个巨大 batch，它能更干净地隔离 initial-state coverage 的影响。不过，它没有固定总浮点计算量：1024-point 模型每个 epoch 执行的 sample-slot forward/backward pass 大约是 32-point 模型的 32 倍。报告结果时应同时给出性能和 wall-clock cost。
