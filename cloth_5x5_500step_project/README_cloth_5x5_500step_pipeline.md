@@ -439,7 +439,7 @@ python cloth07_rollout_models.py \
   --rollout-length 500 \
   --inner-steps 50 \
   --device cuda:0 \
-  --model-dirs models/activation_identity_depth_01_width_0256_no_bias
+  --model-dirs models/activation_identity_depth_01_width_256_no_bias
 ```
 
 同时评估 baseline 和模型：
@@ -452,7 +452,7 @@ python cloth07_rollout_models.py \
   --inner-steps 50 \
   --device cuda:0 \
   --baselines gd adam lbfgs newton \
-  --model-dirs models/activation_identity_depth_01_width_0256_no_bias
+  --model-dirs models/activation_identity_depth_01_width_256_no_bias
 ```
 
 输出目录按 motion id 组织：
@@ -467,7 +467,7 @@ rollouts/motion_003/
 ├── baseline_adam/
 ├── baseline_lbfgs/
 ├── baseline_newton/
-└── model_activation_identity_depth_01_width_0256_no_bias/
+└── model_activation_identity_depth_01_width_256_no_bias/
     ├── rollout.pt
     ├── metrics.json
     └── status.json
@@ -513,7 +513,7 @@ python cloth08_render_rollouts.py \
 python cloth08_render_rollouts.py \
   --root cloth_5x5_500step_pipeline \
   --motion-index 3 \
-  --solver-names baseline_gd model_activation_identity_depth_01_width_0256_no_bias \
+  --solver-names baseline_gd model_activation_identity_depth_01_width_256_no_bias \
   --frame-stride 5 \
   --save-frames \
   --make-video
@@ -725,7 +725,7 @@ python cloth07_rollout_models.py \
   --inner-steps 50 \
   --device cuda:0 \
   --baselines gd adam lbfgs newton \
-  --model-dirs models/activation_identity_depth_01_width_0256_no_bias
+  --model-dirs models/activation_identity_depth_01_width_256_no_bias
 
 python cloth08_render_rollouts.py \
   --root cloth_5x5_500step_pipeline \
@@ -752,3 +752,24 @@ python cloth09_render_reference_motions.py \
 3. 不做过度 try/except 包装。
 4. 不为了“工程完整性”牺牲实验逻辑透明度。
 5. 后续方便替换输入、网络结构、训练方式和数据集构造策略。
+
+
+
+## 补充
+
+```
+6. 缺少最基本的单元测试
+
+这个项目非常适合增加一些物理和形状测试：
+
+full state → free state → full state 往返一致；
+所有 solver 更新后固定点不动；
+解析 residual 与 autograd 梯度一致；
+解析 Hessian 与 autograd Hessian 一致；
+Newton 单步是否降低残差；
+train、validation、unseen、OOD motion 是否互斥；
+每个 problem 是否恰好有指定数量的采样点；
+所有 reference solution 是否有限。
+
+对于新手而言，测试不仅防止改坏代码，也是在告诉他“哪些性质是这个方法必须保证的”。
+```

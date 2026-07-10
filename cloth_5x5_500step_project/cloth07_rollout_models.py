@@ -15,7 +15,7 @@ If it has fewer frames, rollout resumes from the last saved frame.
 
 Run examples:
     python cloth07_rollout_models.py --root cloth_5x5_500step_pipeline --motion-index 3 --rollout-length 500 --baselines gd adam newton
-    python cloth07_rollout_models.py --root cloth_5x5_500step_pipeline --motion-index 3 --model-dirs models/activation_identity_depth_01_width_0256_no_bias
+    python cloth07_rollout_models.py --root cloth_5x5_500step_pipeline --motion-index 3 --model-dirs models/activation_identity_depth_01_width_256_no_bias
 """
 
 from __future__ import annotations
