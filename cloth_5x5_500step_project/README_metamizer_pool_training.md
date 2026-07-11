@@ -1,57 +1,55 @@
-# Metamizer-Style Pool Training for Cloth 5×5
+# Cloth 5x5 的 Metamizer 风格 Pool 训练
 
-This experiment compares the existing 500-step dataset training pipeline with a
-Metamizer-style live training pool.
+这个实验比较两种训练方式：
 
-The key change is that training no longer uses the full 500-step training
-dataset. The pool is initialized only from training motion initial states.
+- 现有的 500-step 数据集训练流程。
+- Metamizer 风格的在线训练 pool。
 
-## Files
+核心变化是：训练不再使用完整的 500-step 训练数据集。Pool 只从训练 motion 的初始状态初始化，然后让模型在自己的在线 rollout 状态分布上训练。
+
+## 文件
 
 ```text
 cloth13_train_metamizer_pool_models.py
 cloth14_evaluate_pool_vs_existing_rollouts.py
 ```
 
-- `cloth13` trains learned optimizers from a live pool.
-- `cloth14` compares the pool-trained models with existing models by continuous
-  500-frame rollout with 50 inner iterations per frame.
+- `cloth13`：从在线 pool 中训练 learned optimizer。
+- `cloth14`：用连续 500 帧 rollout、每帧 50 次 inner iteration，对比 pool 训练模型和已有模型。
 
-The existing `cloth10`–`cloth12` initial-point sampling ablation is left
-unchanged.
+原来的 `cloth10` 到 `cloth12` 初始点采样数量消融实验保持不变。
 
-## Training semantics
+## 训练语义
 
-For every training motion, the pool creates five environments:
+对每个训练 motion，pool 会创建五个环境：
 
 ```text
 iterations_per_timestep = 1, 3, 5, 10, 30
 ```
 
-With the default 16 training motions this gives:
+默认有 16 个训练 motion，所以一共是：
 
 ```text
-16 motions × 5 K-buckets = 80 live environments
+16 个 motion x 5 个 K-bucket = 80 个在线环境
 ```
 
-One parameter update means exactly one learned optimizer update for every live
-environment:
+一次参数更新的含义是：对每个在线环境都做一次 learned optimizer 更新：
 
 ```text
-optimizer.step() == one neural update, not one physical step
+optimizer.step() == 一次神经网络更新，不是一次物理步
 ```
 
-A K-bucket advances the physical environment only after K learned updates:
+某个 K-bucket 只有在完成 K 次 learned update 后，才会推进一次物理环境：
 
 ```text
-K = 1  -> 1000 physical steps per epoch
-K = 3  -> 333 physical steps per epoch
-K = 5  -> 200 physical steps per epoch
-K = 10 -> 100 physical steps per epoch
-K = 30 -> 33 physical steps per epoch
+K = 1  -> 每个 epoch 1000 个物理步
+K = 3  -> 每个 epoch 333 个物理步
+K = 5  -> 每个 epoch 200 个物理步
+K = 10 -> 每个 epoch 100 个物理步
+K = 30 -> 每个 epoch 33 个物理步
 ```
 
-The default schedule is:
+默认训练计划是：
 
 ```text
 epochs            = 50
@@ -59,9 +57,9 @@ updates_per_epoch = 1000
 total updates     = 50,000
 ```
 
-## State update rule
+## 状态更新规则
 
-The learned optimizer update is unchanged from the existing 75D full-state model:
+learned optimizer 的更新形式和已有的 75D full-state 模型一致：
 
 ```text
 input  = [current residual, previous residual, previous update]
@@ -69,30 +67,30 @@ output = 75D full-state displacement update
 fixed vertices are gated/projected after the update
 ```
 
-When an environment completes its K inner updates, it advances:
+当一个环境完成自己的 K 次 inner update 后，物理状态按下面方式推进：
 
 ```text
 x_{n+1} = y
 v_{n+1} = (x_{n+1} - x_n) / dt
 ```
 
-The next physical frame uses:
+下一帧物理计算使用：
 
 ```text
 y^(0) = x_n
 ```
 
-This matches the continuous rollout evaluator in `cloth12`.
+这和 `cloth12` 的连续 rollout evaluator 保持一致。
 
 ## Loss
 
-The pool training loss is intentionally simple:
+Pool 训练里的 loss 被故意设计得很简单：
 
 ```text
 loss = mean(variational_energy_full(y_after_one_update, q, masses)) / physical_energy_scale
 ```
 
-There is:
+这里没有：
 
 ```text
 no exact_y
@@ -101,12 +99,13 @@ no K-step unroll
 no K-step average loss
 ```
 
-## Pool reset checks
+也就是说，它不依赖精确解 `exact_y`，不最小化相对精确能量差，不做 K 步展开，也不对 K 步 loss 求平均。
 
-Every pool update checks for bad states and resets the corresponding environment
-to the motion initial state when needed.
+## Pool reset 检查
 
-Default reset triggers:
+每次 pool update 都会检查异常状态。只要对应环境出现坏状态，就把它 reset 回该 motion 的初始状态。
+
+默认 reset 触发条件：
 
 ```text
 non-finite y / energy / residual
@@ -118,11 +117,11 @@ max spring length > 1e3
 physical age >= 500 steps
 ```
 
-The training log records reset counts by reason.
+训练日志会按原因记录 reset 次数。
 
-## Commands
+## 命令
 
-Run from `cloth_5x5_500step_project/`.
+从 `cloth_5x5_500step_project/` 目录运行。
 
 ### Smoke test
 
@@ -140,7 +139,7 @@ python cloth13_train_metamizer_pool_models.py \
   --overwrite
 ```
 
-### Formal pool training
+### 正式 pool 训练
 
 ```bash
 python cloth13_train_metamizer_pool_models.py \
@@ -158,9 +157,9 @@ python cloth13_train_metamizer_pool_models.py \
   --resume
 ```
 
-### Compare pool models against existing 500-step models
+### 对比 pool 模型和已有 500-step 模型
 
-Default evaluation uses motion 20–31, rollout length 500, and inner steps 50:
+默认评估使用 motion 20 到 31，rollout 长度 500，每帧 50 次 inner step：
 
 ```bash
 python cloth14_evaluate_pool_vs_existing_rollouts.py \
@@ -172,7 +171,7 @@ python cloth14_evaluate_pool_vs_existing_rollouts.py \
   --device cuda:0
 ```
 
-To include the `points_0032` initial-point ablation model and baselines:
+如果还要包含 `points_0032` 初始点消融模型和 baseline：
 
 ```bash
 python cloth14_evaluate_pool_vs_existing_rollouts.py \
@@ -187,7 +186,7 @@ python cloth14_evaluate_pool_vs_existing_rollouts.py \
   --device cuda:0
 ```
 
-To compare all named motions:
+如果要比较所有命名 motion：
 
 ```bash
 python cloth14_evaluate_pool_vs_existing_rollouts.py \
@@ -198,9 +197,9 @@ python cloth14_evaluate_pool_vs_existing_rollouts.py \
   --device cuda:0
 ```
 
-## Outputs
+## 输出
 
-Training outputs:
+训练输出：
 
 ```text
 cloth_5x5_metamizer_pool_training/
@@ -214,7 +213,7 @@ cloth_5x5_metamizer_pool_training/
         └── best_validation_model.pt
 ```
 
-Rollout comparison outputs:
+Rollout 对比输出：
 
 ```text
 cloth_5x5_metamizer_pool_training/
@@ -232,7 +231,7 @@ cloth_5x5_metamizer_pool_training/
             └── rollout_frame_vs_final_residual.png
 ```
 
-Each curve follows the `cloth12` format:
+每条 curve 都沿用 `cloth12` 的格式：
 
 ```text
 residual_by_frame_and_iteration     # [completed_frames, inner_steps + 1]
@@ -243,8 +242,6 @@ velocities
 reference_error_by_frame
 ```
 
-## Main interpretation
+## 主要解读
 
-This experiment tests whether a learned optimizer trained only from initial
-states and its own live residual distribution can match or exceed the continuous
-rollout stability of the model trained on the full 500-step time-step dataset.
+这个实验要回答的问题是：只从初始状态出发，并在模型自己产生的在线 residual 分布上训练 learned optimizer，是否能达到或超过用完整 500-step time-step 数据集训练出来的模型在连续 rollout 稳定性上的表现。

@@ -365,6 +365,46 @@ def save_partial_rollout(
     torch.save(payload, path)
 
 
+def validate_resume_rollout(
+    *,
+    saved: dict[str, Any],
+    output_path: Path,
+    rollout_length: int,
+    inner_steps: int,
+) -> None:
+    metadata = saved.get("metadata", {})
+    try:
+        saved_inner_steps = int(metadata["inner_steps"])
+        saved_rollout_length = int(metadata["requested_rollout_length"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"cannot resume {output_path}: saved metadata is missing rollout settings; "
+            "rerun with --overwrite to regenerate it"
+        ) from exc
+
+    if saved_inner_steps != int(inner_steps):
+        raise RuntimeError(
+            f"cannot resume {output_path}: saved inner_steps={saved_inner_steps}, "
+            f"requested inner_steps={inner_steps}; rerun with --overwrite to regenerate it"
+        )
+
+    if saved_rollout_length != int(rollout_length):
+        raise RuntimeError(
+            f"cannot resume {output_path}: saved rollout_length={saved_rollout_length}, "
+            f"requested rollout_length={rollout_length}; rerun with --overwrite to regenerate it"
+        )
+
+    residuals = saved.get("residual_by_frame_and_iteration")
+    if not torch.is_tensor(residuals) or residuals.ndim != 2:
+        raise RuntimeError(f"cannot resume {output_path}: missing 2D residual tensor")
+    expected_width = int(inner_steps) + 1
+    if int(residuals.shape[1]) != expected_width:
+        raise RuntimeError(
+            f"cannot resume {output_path}: saved residual width={int(residuals.shape[1])}, "
+            f"expected {expected_width}; rerun with --overwrite to regenerate it"
+        )
+
+
 def run_solver_rollout(
     *,
     solver_name: str,
@@ -382,6 +422,12 @@ def run_solver_rollout(
 ) -> dict[str, Any]:
     if output_path.exists() and not overwrite:
         saved = torch.load(output_path, map_location="cpu")
+        validate_resume_rollout(
+            saved=saved,
+            output_path=output_path,
+            rollout_length=rollout_length,
+            inner_steps=inner_steps,
+        )
         if int(saved["metadata"]["completed_steps"]) >= rollout_length:
             print(f"skip {solver_name} motion {motion_index}: complete")
             return saved

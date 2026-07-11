@@ -108,6 +108,7 @@ max_gpu_memory_no_detach_test_cuda1/
 cloth_5x5_500step_pipeline/
 old_500step_vs_nonlinear_test_eval/
 cloth_5x5_initial_sample_ablation/
+cloth_5x5_metamizer_pool_training/
 # =========================
 
 ## Project-specific result folders
