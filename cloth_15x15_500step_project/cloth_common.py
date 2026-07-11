@@ -1,4 +1,4 @@
-"""Small shared I/O and evaluation helpers for the 15x15 project."""
+"""Shared I/O, residual summaries, and learned-model evaluation helpers."""
 from __future__ import annotations
 
 import csv
@@ -72,43 +72,117 @@ def finite_float(value: float | torch.Tensor) -> float:
     return number if math.isfinite(number) else float("inf")
 
 
-def summarize_one_step(r0: np.ndarray, r1: np.ndarray) -> dict[str, Any]:
-    r0 = np.asarray(r0, dtype=float)
-    r1 = np.asarray(r1, dtype=float)
-    finite = np.isfinite(r0) & np.isfinite(r1)
-    safe0 = np.maximum(r0[finite], 1e-30)
-    safe1 = np.maximum(r1[finite], 1e-30)
-    ratio = safe1 / safe0
-    log_ratio = np.log10(ratio)
+def _higher_percentile(values: np.ndarray, q: float) -> float:
+    if values.size == 0:
+        return float("inf")
+    try:
+        return float(np.percentile(values, q, method="higher"))
+    except TypeError:
+        return float(np.percentile(values, q, interpolation="higher"))
 
-    def stat(values: np.ndarray, kind: str) -> float:
-        if values.size == 0:
-            return float("inf")
-        if kind == "mean":
-            return float(np.mean(values))
-        if kind == "p50":
-            return float(np.percentile(values, 50))
-        if kind == "p95":
-            return float(np.percentile(values, 95))
-        if kind == "p99":
-            return float(np.percentile(values, 99))
-        if kind == "max":
-            return float(np.max(values))
-        raise ValueError(kind)
 
-    result: dict[str, Any] = {
-        "num_points": int(r0.size),
-        "num_finite": int(finite.sum()),
-        "num_nonfinite": int((~finite).sum()),
-        "improvement_fraction": float(np.mean(r1[finite] < r0[finite])) if finite.any() else 0.0,
+def summarize_residual_curve(curve: np.ndarray) -> dict[str, Any]:
+    residual = np.asarray(curve, dtype=float).copy()
+    residual[~np.isfinite(residual)] = np.inf
+    if residual.ndim != 2 or residual.shape[1] < 1:
+        raise ValueError(f"expected [N,T] residual curve, got {residual.shape}")
+
+    mean_by_iter: list[float] = []
+    p50_by_iter: list[float] = []
+    p95_by_iter: list[float] = []
+    p99_by_iter: list[float] = []
+    max_by_iter: list[float] = []
+    nonfinite_by_iter: list[int] = []
+    for iteration in range(residual.shape[1]):
+        values = residual[:, iteration]
+        nonfinite_by_iter.append(int((~np.isfinite(values)).sum()))
+        mean_by_iter.append(float(np.mean(values)))
+        p50_by_iter.append(_higher_percentile(values, 50.0))
+        p95_by_iter.append(_higher_percentile(values, 95.0))
+        p99_by_iter.append(_higher_percentile(values, 99.0))
+        max_by_iter.append(float(np.max(values)))
+
+    initial = residual[:, 0]
+    final = residual[:, -1]
+    finite_pair = np.isfinite(initial) & np.isfinite(final)
+    ratio = np.full_like(final, np.inf)
+    ratio[finite_pair] = final[finite_pair] / np.maximum(initial[finite_pair], 1e-30)
+
+    return {
+        "num_points": int(residual.shape[0]),
+        "num_iterations": int(residual.shape[1] - 1),
+        "residual_mean_by_iter": mean_by_iter,
+        "residual_p50_by_iter": p50_by_iter,
+        "residual_p95_by_iter": p95_by_iter,
+        "residual_p99_by_iter": p99_by_iter,
+        "residual_max_by_iter": max_by_iter,
+        "nonfinite_count_by_iter": nonfinite_by_iter,
+        "final_residual_mean": mean_by_iter[-1],
+        "final_residual_p50": p50_by_iter[-1],
+        "final_residual_p95": p95_by_iter[-1],
+        "final_residual_p99": p99_by_iter[-1],
+        "final_residual_max": max_by_iter[-1],
+        "final_nonfinite_count": nonfinite_by_iter[-1],
+        "final_improvement_fraction": (
+            float(np.mean(final[finite_pair] < initial[finite_pair])) if finite_pair.any() else 0.0
+        ),
+        "final_ratio_mean": float(np.mean(ratio)),
+        "final_ratio_p95": _higher_percentile(ratio, 95.0),
+        "selection_metric_name": "final_residual_p95",
+        "selection_metric": p95_by_iter[-1],
     }
-    for label, values in (("r0", r0[finite]), ("r1", r1[finite]), ("ratio", ratio), ("log10_ratio", log_ratio)):
-        for kind in ("mean", "p50", "p95", "p99", "max"):
-            result[f"{label}_{kind}"] = stat(values, kind)
-    # Primary checkpoint score: robust tail behavior of relative one-step progress.
-    result["selection_metric_name"] = "log10_ratio_p95"
-    result["selection_metric"] = result["log10_ratio_p95"]
-    return result
+
+
+@torch.no_grad()
+def evaluate_model_iterations(
+    *,
+    model: MLPOptimizer,
+    dataset: dict[str, Any],
+    physical,
+    steps: int,
+    device: torch.device,
+    batch_size: int,
+) -> dict[str, Any]:
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+    model.eval()
+    curves: list[torch.Tensor] = []
+    n = int(dataset["initial_y"].shape[0])
+    for start in range(0, n, batch_size):
+        stop = min(start + batch_size, n)
+        y = dataset["initial_y"][start:stop].to(device=device, dtype=TORCH_DTYPE)
+        q = dataset["q"][start:stop].to(device=device, dtype=TORCH_DTYPE)
+        masses = dataset["masses"][start:stop].to(device=device, dtype=TORCH_DTYPE)
+        y = project_fixed_vertices(y, physical)
+        previous_residual = torch.zeros_like(y)
+        previous_update = torch.zeros_like(y)
+        batch_curve: list[torch.Tensor] = []
+        for iteration in range(steps + 1):
+            batch_curve.append(
+                stationarity_residual_norm_full(y, q, masses, physical).detach().cpu()
+            )
+            if iteration == steps:
+                break
+            y, delta, current_residual = apply_model_update(
+                model,
+                y,
+                q,
+                masses,
+                physical,
+                previous_residual=previous_residual,
+                previous_update=previous_update,
+            )
+            previous_residual = current_residual.detach()
+            previous_update = delta.detach()
+        curves.append(torch.stack(batch_curve, dim=1))
+
+    curve_tensor = torch.cat(curves, dim=0).contiguous()
+    curve_np = curve_tensor.numpy().astype(float)
+    curve_np[~np.isfinite(curve_np)] = np.inf
+    return {
+        "summary": summarize_residual_curve(curve_np),
+        "curve": torch.from_numpy(curve_np),
+    }
 
 
 @torch.no_grad()
@@ -120,36 +194,20 @@ def evaluate_one_step(
     device: torch.device,
     batch_size: int,
 ) -> dict[str, Any]:
-    model.eval()
-    residual0: list[torch.Tensor] = []
-    residual1: list[torch.Tensor] = []
-    n = int(dataset["initial_y"].shape[0])
-    for start in range(0, n, batch_size):
-        stop = min(start + batch_size, n)
-        y = dataset["initial_y"][start:stop].to(device=device, dtype=TORCH_DTYPE)
-        q = dataset["q"][start:stop].to(device=device, dtype=TORCH_DTYPE)
-        masses = dataset["masses"][start:stop].to(device=device, dtype=TORCH_DTYPE)
-        y = project_fixed_vertices(y, physical)
-        r0 = stationarity_residual_norm_full(y, q, masses, physical)
-        zeros = torch.zeros_like(y)
-        y1, _, _ = apply_model_update(
-            model,
-            y,
-            q,
-            masses,
-            physical,
-            previous_residual=zeros,
-            previous_update=zeros,
-        )
-        r1 = stationarity_residual_norm_full(y1, q, masses, physical)
-        residual0.append(r0.cpu())
-        residual1.append(r1.cpu())
-    r0_np = torch.cat(residual0).numpy().astype(float)
-    r1_np = torch.cat(residual1).numpy().astype(float)
+    result = evaluate_model_iterations(
+        model=model,
+        dataset=dataset,
+        physical=physical,
+        steps=1,
+        device=device,
+        batch_size=batch_size,
+    )
+    curve = result["curve"]
     return {
-        "summary": summarize_one_step(r0_np, r1_np),
-        "residual_before": torch.from_numpy(r0_np),
-        "residual_after": torch.from_numpy(r1_np),
+        "summary": result["summary"],
+        "residual_before": curve[:, 0],
+        "residual_after": curve[:, 1],
+        "curve": curve,
     }
 
 
