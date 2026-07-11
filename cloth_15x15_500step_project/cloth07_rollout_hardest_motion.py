@@ -28,14 +28,15 @@ def main():
     reference=states['positions'][row,:a.rollout_length+1]; refv=states['velocities'][row,:a.rollout_length+1]
     model,spec=load_model(a.checkpoint,device); masses=torch.tensor([physical.masses[i] for i in range(NUM_PARTICLES) if i not in set(FIXED_VERTEX_INDICES)],dtype=TORCH_DTYPE,device=device).reshape(1,-1)
     positions=[reference[0].clone()]; velocities=[refv[0].clone()]; curves=[]; errors=[]; elapsed=[]
-    for frame in range(a.rollout_length):
-        t=time.perf_counter(); pn=positions[-1].to(device); vn=velocities[-1].to(device); qf=make_q_free(pn,vn,physical).reshape(1,-1); q=project_fixed_vertices(full_state_from_free_state(qf,physical),physical); y=project_fixed_vertices(full_state_from_positions(pn).reshape(1,-1),physical)
-        pr=torch.zeros_like(y); pu=torch.zeros_like(y); rc=[float(stationarity_residual_norm_full(y,q,masses,physical).item())]
-        for _ in range(a.inner_steps): y,d,r=apply_model_update(model,y,q,masses,physical,previous_residual=pr,previous_update=pu); pr=r.detach(); pu=d.detach(); rc.append(float(stationarity_residual_norm_full(y,q,masses,physical).item()))
-        if not torch.isfinite(y).all() or not all(math.isfinite(v) for v in rc): print(f'failed at frame {frame}'); break
-        pnext=y.reshape(NUM_PARTICLES,SPATIAL_DIM); vnext=(pnext-pn)/physical.dt; vnext[list(FIXED_VERTEX_INDICES)]=0
-        positions.append(pnext.cpu()); velocities.append(vnext.cpu()); curves.append(torch.tensor(rc,dtype=TORCH_DTYPE)); errors.append(float(torch.linalg.vector_norm(pnext-reference[frame+1].to(device)).item())); elapsed.append(time.perf_counter()-t)
-        if frame==0 or (frame+1)%25==0: print(f'motion={motion} frame={frame+1}/{a.rollout_length} residual={rc[-1]:.3e} error={errors[-1]:.3e}')
+    with torch.no_grad():
+        for frame in range(a.rollout_length):
+            t=time.perf_counter(); pn=positions[-1].to(device); vn=velocities[-1].to(device); qf=make_q_free(pn,vn,physical).reshape(1,-1); q=project_fixed_vertices(full_state_from_free_state(qf,physical),physical); y=project_fixed_vertices(full_state_from_positions(pn).reshape(1,-1),physical)
+            pr=torch.zeros_like(y); pu=torch.zeros_like(y); rc=[float(stationarity_residual_norm_full(y,q,masses,physical).item())]
+            for _ in range(a.inner_steps): y,d,r=apply_model_update(model,y,q,masses,physical,previous_residual=pr,previous_update=pu); pr=r.detach(); pu=d.detach(); rc.append(float(stationarity_residual_norm_full(y,q,masses,physical).item()))
+            if not torch.isfinite(y).all() or not all(math.isfinite(v) for v in rc): print(f'failed at frame {frame}'); break
+            pnext=y.reshape(NUM_PARTICLES,SPATIAL_DIM); vnext=(pnext-pn)/physical.dt; vnext[list(FIXED_VERTEX_INDICES)]=0
+            positions.append(pnext.detach().cpu()); velocities.append(vnext.detach().cpu()); curves.append(torch.tensor(rc,dtype=TORCH_DTYPE)); errors.append(float(torch.linalg.vector_norm(pnext-reference[frame+1].to(device)).item())); elapsed.append(time.perf_counter()-t)
+            if frame==0 or (frame+1)%25==0: print(f'motion={motion} frame={frame+1}/{a.rollout_length} residual={rc[-1]:.3e} error={errors[-1]:.3e}')
     out=a.output or a.root/'rollouts'/f'motion_{motion:03d}'/spec.experiment_name/'curve.pt'; out.parent.mkdir(parents=True,exist_ok=True)
     torch.save({'motion_index':motion,'model_spec':spec.__dict__,'positions':torch.stack(positions),'velocities':torch.stack(velocities),'residual_by_frame_and_iteration':torch.stack(curves) if curves else torch.empty(0,a.inner_steps+1),'reference_error_by_frame':torch.tensor(errors),'elapsed_seconds_by_frame':torch.tensor(elapsed),'metadata':{'requested_rollout_length':a.rollout_length,'completed_frames':len(curves),'inner_steps':a.inner_steps,'selection':'highest reference residual_p95 among finite test motions'}},out)
     save_json({'motion_index':motion,'checkpoint':str(a.checkpoint),'output':str(out),'completed_frames':len(curves)},out.with_suffix('.json')); print(out)
