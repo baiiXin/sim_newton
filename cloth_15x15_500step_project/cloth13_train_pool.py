@@ -35,7 +35,7 @@ def main():
     spec=ModelSpec(a.activation,a.depth,a.width,a.use_bias); out=a.root/'experiments'/'training_pool'/'samples_0000'/spec.experiment_name; out.mkdir(parents=True,exist_ok=True)
     torch.manual_seed(a.seed); np.random.seed(a.seed); model=MLPOptimizer(a.residual_length_scale,spec).to(device); optimizer=torch.optim.Adam(model.parameters(),lr=a.learning_rate)
     start,best,updates=1,math.inf,0; logs=[]; history=[]; latest=out/'latest_checkpoint.pt'
-    config={'training_method':'Metamizer-style live pool','model_spec':asdict(spec),'parameter_count':model.parameter_count,'train_motions':train_motions,'k_buckets':a.k_buckets,'updates_per_epoch':a.updates_per_epoch,'epochs':a.epochs,'loss':'mean physical energy after one learned update / energy scale','validation':'all validation xn problems, exactly one update','checkpoint_metric':'p95(log10(r1/r0))','residual_length_scale':a.residual_length_scale}; save_json(config,out/'config.json')
+    config={'sample_count':0,'training_method':'Metamizer-style live pool','model_spec':asdict(spec),'parameter_count':model.parameter_count,'train_motions':train_motions,'k_buckets':a.k_buckets,'updates_per_epoch':a.updates_per_epoch,'epochs':a.epochs,'loss':'mean physical energy after one learned update / energy scale','validation':'all validation xn problems, exactly one update','checkpoint_metric':'p95(log10(r1/r0))','residual_length_scale':a.residual_length_scale}; save_json(config,out/'config.json')
     if a.resume and latest.exists() and not a.overwrite:
         c=torch.load(latest,map_location=device); model.load_state_dict(c['model_state_dict']); optimizer.load_state_dict(c['optimizer_state_dict']); start=int(c['epoch'])+1; best=float(c.get('best_validation',math.inf)); updates=int(c.get('update_count',0))
     pool=ClothPool(motions=motions,motion_indices=train_motions,k_buckets=a.k_buckets,physical=physical,device=device,args=a); save_json(pool.manifest(),out/'pool_manifest.json'); scale=physical_energy_scale(pool.masses.detach(),physical,a.residual_length_scale)
@@ -50,6 +50,14 @@ def main():
         row={'epoch':epoch,'update_count':updates,'loss_mean':float(np.mean(losses)),'residual_mean':float(np.mean(residuals)),'elapsed_seconds':time.perf_counter()-t,**reset_totals}; logs.append(row); write_csv(logs,out/'train_log.csv'); save_ckpt(latest,model,optimizer,epoch,updates,spec,best,config)
         if epoch==1 or epoch%a.validation_interval==0 or epoch==a.epochs:
             val=evaluate_one_step(model=model,dataset=validation,physical=physical,device=device,batch_size=a.evaluation_batch_size); record={'epoch':epoch,'update_count':updates,**val['summary']}; history.append(record); save_json({'history':history},out/'validation_metrics.json'); score=float(record['selection_metric'])
-            if score<best: best=score; save_ckpt(out/'best_validation_model.pt',model,optimizer,epoch,updates,spec,best,config)
+            best_path=out/'best_validation_model.pt'
+            if (not best_path.exists()) or score<best: best=score; save_ckpt(best_path,model,optimizer,epoch,updates,spec,best,config)
             print(f'pool epoch={epoch}/{a.epochs} loss={row["loss_mean"]:.3e} val_p95_log_ratio={score:.3e} resets={row["resets_total"]}')
+    best_ckpt=torch.load(out/'best_validation_model.pt',map_location=device); model.load_state_dict(best_ckpt['model_state_dict']); model.eval()
+    test_metrics={}; test_curves={}
+    for name in ('test_id_xn','test_ood_xn','test_all_xn'):
+        result=evaluate_one_step(model=model,dataset=load_dataset(name,a.root),physical=physical,device=device,batch_size=a.evaluation_batch_size)
+        test_metrics[name]=result['summary']; test_curves[name]={'r0':result['residual_before'],'r1':result['residual_after']}
+    save_json(test_metrics,out/'test_metrics.json'); torch.save(test_curves,out/'test_curves.pt')
+    save_json({'completed':True,'best_validation':best},out/'completed.json')
 if __name__=='__main__': main()
