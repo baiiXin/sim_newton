@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+points_*/
+figures/
+run_config.json
+summary_metrics.csv
+all_metrics.json

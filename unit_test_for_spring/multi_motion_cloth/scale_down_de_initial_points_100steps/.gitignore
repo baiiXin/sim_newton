@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+history/
+degenerate/
+figures/
+figures_1x256/
+run_config.json
+summary_metrics.csv
+all_metrics.json
