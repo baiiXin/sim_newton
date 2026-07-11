@@ -52,7 +52,10 @@ class SampleSource:
         self.window_index: dict[tuple[int, int, int], Path] = {}
         if self.format == "window_shards_v1":
             for item in self.source_manifest["records"]:
-                self.window_index[(int(item["motion_index"]), int(item["time_start"]), int(item["time_stop"]))] = Path(item["path"])
+                shard_path = Path(item["path"])
+                if not shard_path.is_absolute():
+                    shard_path = root / shard_path
+                self.window_index[(int(item["motion_index"]), int(item["time_start"]), int(item["time_stop"]))] = shard_path
 
     @property
     def available_points(self) -> int:
@@ -232,8 +235,9 @@ def train_one(args, spec, physical, device, train_manifest, source, validation, 
             save_json({"history": history}, out / "validation_metrics.json")
             torch.save({"residual_before": val["residual_before"], "residual_after": val["residual_after"]}, out / f"validation_epoch_{epoch:04d}.pt")
             score = float(val["summary"]["selection_metric"])
-            if score < best:
-                best = score; checkpoint(out / "best_validation_model.pt", model, optimizer, epoch, spec, best, config)
+            best_path = out / "best_validation_model.pt"
+            if (not best_path.exists()) or score < best:
+                best = score; checkpoint(best_path, model, optimizer, epoch, spec, best, config)
             print(f"{spec.experiment_name} epoch={epoch:04d} K={k} loss={row['loss_mean']:.3e} val_p95_log_ratio={score:.3e} best={best:.3e}")
     saved = torch.load(out / "best_validation_model.pt", map_location=device); model.load_state_dict(saved["model_state_dict"])
     test_summary = {}; test_curves = {}
