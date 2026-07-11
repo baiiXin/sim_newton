@@ -92,6 +92,27 @@ def problems_to_reference(problems: list[TimeStepProblem], physical) -> dict[str
     }
 
 
+def concatenate_reference_shards(shards: list[dict[str, Any]]) -> dict[str, Any]:
+    if not shards:
+        raise ValueError("no reference shards")
+    tensor_keys = [
+        "p_n_full", "v_n_full", "q", "exact_y", "q_free", "exact_y_free",
+        "masses", "problem_index", "motion_index", "time_index", "time",
+        "raw_sampling_radius", "sampling_radius", "exact_energy", "exact_residual",
+    ]
+    result = {key: torch.cat([shard[key] for shard in shards], dim=0).contiguous() for key in tensor_keys}
+    result["metadata"] = {
+        "grid": [GRID_ROWS, GRID_COLS],
+        "state_dim": FULL_STATE_DIM,
+        "free_state_dim": FREE_STATE_DIM,
+        "num_problems": int(result["problem_index"].numel()),
+        "problem_unit": "one motion at one physical time step",
+        "state_representation": f"full {FULL_STATE_DIM}D positions with fixed vertices projected",
+        "assembled_from_per_motion_shards": True,
+    }
+    return result
+
+
 def build_motion_states(reference: dict[str, Any], total_steps: int, physical) -> dict[str, Any]:
     positions_all: list[torch.Tensor] = []
     velocities_all: list[torch.Tensor] = []
@@ -316,6 +337,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-only", action="store_true")
     parser.add_argument("--skip-initial-plots", action="store_true")
     parser.add_argument("--overwrite-samples", action="store_true")
+    parser.add_argument("--overwrite-reference", action="store_true", help="regenerate existing per-motion reference shards")
     return parser.parse_args()
 
 
@@ -339,16 +361,33 @@ def main() -> None:
         if not args.skip_initial_plots:
             for motion in motions:
                 plot_initial_state(motion, physical, reference_dir / "initial_state_figures" / f"motion_{motion.index:03d}.png")
-        all_problems: list[TimeStepProblem] = []
+        per_motion_dir = reference_dir / "per_motion"
+        per_motion_dir.mkdir(parents=True, exist_ok=True)
+        reference_shards: list[dict[str, Any]] = []
         for motion in motions:
-            all_problems.extend(generate_reference_sequence_for_motion(
-                physical=physical,
-                motion=motion,
-                total_steps=args.total_time_steps,
-                sampling_radius_min=args.sampling_radius_min,
-                sampling_radius_max=args.sampling_radius_max,
-            ))
-        reference = problems_to_reference(all_problems, physical)
+            shard_path = per_motion_dir / f"motion_{motion.index:03d}.pt"
+            if shard_path.exists() and not args.overwrite_reference:
+                shard = torch.load(shard_path, map_location="cpu")
+                expected = int(args.total_time_steps)
+                if int(shard["problem_index"].numel()) != expected:
+                    raise RuntimeError(
+                        f"{shard_path} has {shard['problem_index'].numel()} frames, expected {expected}; "
+                        "rerun with --overwrite-reference"
+                    )
+                print(f"reuse reference shard {shard_path}")
+            else:
+                motion_problems = generate_reference_sequence_for_motion(
+                    physical=physical,
+                    motion=motion,
+                    total_steps=args.total_time_steps,
+                    sampling_radius_min=args.sampling_radius_min,
+                    sampling_radius_max=args.sampling_radius_max,
+                )
+                shard = problems_to_reference(motion_problems, physical)
+                torch.save(shard, shard_path)
+                print(f"saved reference shard {shard_path}")
+            reference_shards.append(shard)
+        reference = concatenate_reference_shards(reference_shards)
         states = build_motion_states(reference, args.total_time_steps, physical)
         torch.save(reference, reference_path)
         torch.save(states, states_path)
