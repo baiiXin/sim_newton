@@ -1,9 +1,10 @@
 """Build compact train/evaluation manifests for the 15x15 pipeline.
 
-Validation/test semantics are deliberately different from the old 5x5 pipeline:
-- use every physical time step of every original split motion;
-- use exactly one initial state per problem, y^(0)=x_n;
-- learned evaluation performs exactly one update (handled by cloth05).
+Validation and test contain independent physical time-step problems:
+- every frame from every original validation/test motion;
+- exactly one initial state per problem, y^(0)=x_n;
+- default evaluation runs 50 inner optimizer iterations;
+- there is no cross-frame propagation inside validation/test.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ TRAIN = tuple(range(0, 16))
 VALIDATION = tuple(range(16, 20))
 TEST_ID = tuple(range(20, 24))
 TEST_OOD = tuple(range(24, 32))
+DEFAULT_EVALUATION_ITERATIONS = 50
 
 
 def select_reference_dataset(
@@ -26,10 +28,13 @@ def select_reference_dataset(
     motion_indices: Sequence[int],
     total_steps: int,
     name: str,
+    evaluation_iterations: int,
 ) -> dict[str, Any]:
     motion_set = torch.tensor(list(motion_indices), dtype=torch.long)
     time_set = torch.arange(total_steps, dtype=torch.long)
-    mask = torch.isin(reference["motion_index"], motion_set) & torch.isin(reference["time_index"], time_set)
+    mask = torch.isin(reference["motion_index"], motion_set) & torch.isin(
+        reference["time_index"], time_set
+    )
     return {
         "initial_y": reference["p_n_full"][mask].contiguous(),
         "q": reference["q"][mask].contiguous(),
@@ -45,7 +50,9 @@ def select_reference_dataset(
             "num_points": int(mask.sum().item()),
             "points_per_problem": 1,
             "initial_state": "x_n",
-            "evaluation_updates": 1,
+            "problem_semantics": "one independent physical time-step problem",
+            "evaluation_inner_iterations": int(evaluation_iterations),
+            "cross_frame_propagation": False,
         },
     }
 
@@ -62,6 +69,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=Path("cloth_15x15_500step_pipeline"))
     parser.add_argument("--train-time-stop", type=int, default=400)
     parser.add_argument("--time-steps-per-motion-batch", type=int, default=32)
+    parser.add_argument(
+        "--evaluation-iterations", type=int, default=DEFAULT_EVALUATION_ITERATIONS
+    )
     parser.add_argument("--exclude-motion-indices", type=int, nargs="*", default=[])
     parser.add_argument("--exclusion-file", type=Path, default=None)
     return parser.parse_args()
@@ -69,9 +79,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.evaluation_iterations <= 0:
+        raise ValueError("evaluation-iterations must be positive")
     runtime = load_json(args.root / "data" / "reference" / "runtime_config.json")
     total_steps = int(runtime["total_time_steps"])
-    reference = torch.load(args.root / "data" / "reference" / "reference_problems.pt", map_location="cpu")
+    reference = torch.load(
+        args.root / "data" / "reference" / "reference_problems.pt", map_location="cpu"
+    )
     exclusion_file = args.exclusion_file or (args.root / "data" / "motion_exclusions.json")
     exclusions = resolve_exclusions(args.exclude_motion_indices, exclusion_file)
 
@@ -85,14 +99,25 @@ def main() -> None:
     dataset_dir = args.root / "data" / "datasets"
     dataset_dir.mkdir(parents=True, exist_ok=True)
     named = {
-        "validation_xn": select_reference_dataset(reference, validation, total_steps, "validation_xn"),
-        "test_id_xn": select_reference_dataset(reference, test_id, total_steps, "test_id_xn"),
-        "test_ood_xn": select_reference_dataset(reference, test_ood, total_steps, "test_ood_xn"),
-        "test_all_xn": select_reference_dataset(reference, test_id + test_ood, total_steps, "test_all_xn"),
+        "validation_xn": select_reference_dataset(
+            reference, validation, total_steps, "validation_xn", args.evaluation_iterations
+        ),
+        "test_id_xn": select_reference_dataset(
+            reference, test_id, total_steps, "test_id_xn", args.evaluation_iterations
+        ),
+        "test_ood_xn": select_reference_dataset(
+            reference, test_ood, total_steps, "test_ood_xn", args.evaluation_iterations
+        ),
+        "test_all_xn": select_reference_dataset(
+            reference, test_id + test_ood, total_steps, "test_all_xn", args.evaluation_iterations
+        ),
     }
     for name, data in named.items():
         torch.save(data, dataset_dir / f"{name}.pt")
-        print(f"saved {name}: {data['metadata']['num_points']} one-step problems")
+        print(
+            f"saved {name}: {data['metadata']['num_points']} independent time-step problems, "
+            f"{args.evaluation_iterations} inner iterations"
+        )
 
     sample_manifest = load_json(args.root / "data" / "samples" / "manifest.json")
     missing = [i for i in train if i not in set(sample_manifest["motion_indices"])]
@@ -108,28 +133,42 @@ def main() -> None:
         "windows": windows,
         "sample_root": str((args.root / "data" / "samples").resolve()),
         "points_per_problem_available": int(sample_manifest["points_per_problem"]),
-        "sample_prefix_semantics": "first N Sobol samples; all N sets are nested",
+        "sample_prefix_semantics": "first N stored samples; ablation shards define their own x_n prefix",
         "excluded_motion_indices": list(exclusions),
     }
     save_json(train_manifest, dataset_dir / "train_manifest.json")
-    save_json({
-        "total_time_steps": total_steps,
-        "excluded_motion_indices": list(exclusions),
-        "splits": {
-            "train": list(train),
-            "validation": list(validation),
-            "test_id": list(test_id),
-            "test_ood": list(test_ood),
+    save_json(
+        {
+            "total_time_steps": total_steps,
+            "evaluation_inner_iterations": args.evaluation_iterations,
+            "excluded_motion_indices": list(exclusions),
+            "splits": {
+                "train": list(train),
+                "validation": list(validation),
+                "test_id": list(test_id),
+                "test_ood": list(test_ood),
+            },
+            "validation_semantics": (
+                "all validation motions and all physical frames; each row starts from x_n, "
+                f"runs {args.evaluation_iterations} inner iterations, and does not propagate to another frame"
+            ),
+            "test_semantics": (
+                "all test motions and all physical frames; each row starts from x_n, "
+                f"runs {args.evaluation_iterations} inner iterations, and does not propagate to another frame"
+            ),
+            "rollout_semantics": (
+                "one hardest converged test motion, 500 propagated physical frames, separate script"
+            ),
+            "train_manifest": train_manifest,
+            "datasets": {k: v["metadata"] for k, v in named.items()},
         },
-        "validation_semantics": "all time steps, y0=x_n, exactly one learned update",
-        "test_semantics": "all time steps, y0=x_n, exactly one learned update",
-        "rollout_semantics": "one hardest converged test motion, 500 physical frames, separate script",
-        "train_manifest": train_manifest,
-        "datasets": {k: v["metadata"] for k, v in named.items()},
-    }, dataset_dir / "dataset_manifest.json")
+        dataset_dir / "dataset_manifest.json",
+    )
 
 
-def load_dataset(name: str, root: str | Path = "cloth_15x15_500step_pipeline") -> dict[str, Any]:
+def load_dataset(
+    name: str, root: str | Path = "cloth_15x15_500step_pipeline"
+) -> dict[str, Any]:
     return torch.load(Path(root) / "data" / "datasets" / f"{name}.pt", map_location="cpu")
 
 
