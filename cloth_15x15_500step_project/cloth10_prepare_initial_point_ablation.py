@@ -28,7 +28,7 @@ def main():
         for start in range(0,a.train_time_stop,a.time_window):
             stop=min(start+a.time_window,a.train_time_stop); path=out/f'motion_{motion:03d}'/f'time_{start:03d}_{stop-1:03d}.pt'
             if path.exists() and not a.overwrite:
-                records.append({'motion_index':motion,'time_start':start,'time_stop':stop,'path':str(path.resolve()),'reused':True}); continue
+                records.append({'motion_index':motion,'time_start':start,'time_stop':stop,'path':str(path.relative_to(out)),'reused':True}); continue
             mask=(reference['motion_index']==motion)&(reference['time_index']>=start)&(reference['time_index']<stop); rows=torch.nonzero(mask,as_tuple=False).flatten(); rows=rows[torch.argsort(reference['time_index'].index_select(0,rows))]
             initial=torch.empty((stop-start,a.max_points,FULL_STATE_DIM),dtype=TORCH_DTYPE)
             for local,row in enumerate(rows.tolist()):
@@ -36,7 +36,7 @@ def main():
                 initial[local]=project_fixed_vertices(full_state_from_free_state(points,physical),physical).cpu()
                 print(f'motion={motion:03d} time={time_index:03d} points={a.max_points}')
             path.parent.mkdir(parents=True,exist_ok=True); torch.save({'initial_y':initial.contiguous(),'metadata':{'format':'window_shard_v1','motion_index':motion,'time_start':start,'time_stop':stop,'max_points':a.max_points,'physical_xn_included':False,'nested_prefixes':list(counts)}},path)
-            records.append({'motion_index':motion,'time_start':start,'time_stop':stop,'path':str(path.resolve()),'reused':False})
+            records.append({'motion_index':motion,'time_start':start,'time_stop':stop,'path':str(path.relative_to(out)),'reused':False})
     save_json({'format':'window_shards_v1','max_points':a.max_points,'points_per_problem':a.max_points,'sample_counts':list(counts),'motion_indices':motions,'train_time_range':[0,a.train_time_stop-1],'time_window':a.time_window,'physical_xn_included':False,'nested_prefixes':True,'approx_initial_y_storage_gib':len(motions)*a.train_time_stop*a.max_points*FULL_STATE_DIM*8/2**30,'records':records},out/'manifest.json')
     print(out/'manifest.json')
 if __name__=='__main__': main()
