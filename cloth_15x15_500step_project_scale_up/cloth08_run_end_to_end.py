@@ -180,7 +180,7 @@ def main() -> None:
     if not args.skip_training:
         train_command = [
             sys.executable,
-            str(project_dir / "cloth05_train_scale_up.py"),
+            str(project_dir / "cloth05_train_scale_up_robust.py"),
             "--root",
             str(args.root),
             "--catalogue",
