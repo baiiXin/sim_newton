@@ -29,9 +29,11 @@ jobs:
           python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
       - name: Compile scale-up project
         run: python -m compileall -q cloth_15x15_500step_project_scale_up
-      - name: Check trainer command line
+      - name: Check trainer and memory probe command lines
         working-directory: cloth_15x15_500step_project_scale_up
-        run: python cloth05_train_scale_up.py --help > /dev/null
+        run: |
+          python cloth05_train_scale_up.py --help > /dev/null
+          python cloth06_probe_memory_and_throughput.py --help > /dev/null
       - name: Run catalogue physics and pool tests
         working-directory: cloth_15x15_500step_project_scale_up
         run: >-
@@ -39,6 +41,21 @@ jobs:
           test_scenario_catalogue.py
           test_batched_physics.py
           test_training_pool.py
+      - name: Run CPU memory probe smoke test
+        working-directory: cloth_15x15_500step_project_scale_up
+        run: |
+          rm -rf /tmp/cloth15-memory-probe
+          python cloth06_probe_memory_and_throughput.py \
+            --device cpu \
+            --catalogue c1 \
+            --pool-size 8 \
+            --batch-sizes 4 \
+            --k-buckets 1 3 10 30 \
+            --warmup-updates 0 \
+            --measured-updates 1 \
+            --width 16 \
+            --output-dir /tmp/cloth15-memory-probe
+          python -c "import json, pathlib; root=pathlib.Path('/tmp/cloth15-memory-probe'); data=json.loads((root/'memory_probe.json').read_text()); rec=json.loads((root/'recommended_training_config.json').read_text()); assert data['results'][0]['status']=='success'; assert rec['recommended_batch_size']==4"
       - name: Run full in-memory audit
         working-directory: cloth_15x15_500step_project_scale_up
         run: python cloth01_build_scenario_catalogue.py --audit-only
