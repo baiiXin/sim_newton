@@ -23,16 +23,21 @@ from scenario_catalogue import build_catalogues
 from validation_protocol import ValidationProtocol
 
 
-DEFAULT_RUN_DIR = Path(
-    "cloth_15x15_scale_up_pipeline/experiments/train_c2/"
-    "activation_identity_depth_01_width_0256_no_bias/seed_42"
-)
+DEFAULT_ROOT = Path("cloth_15x15_scale_up_pipeline")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--catalogue", choices=("c1", "c2", "c3"), default="c2")
+    parser.add_argument("--activation", default="identity")
+    parser.add_argument("--depth", type=int, default=1)
+    parser.add_argument("--width", type=int, default=256)
+    parser.add_argument("--use-bias", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--checkpoint-update", type=int, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("auto", "float64", "float32"), default="auto")
@@ -51,6 +56,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-edge-ratio", type=float, default=1e4)
     parser.add_argument("--max-constraint-error", type=float, default=1e-9)
     return parser.parse_args()
+
+
+def run_directory(args: argparse.Namespace) -> Path:
+    if args.run_dir is not None:
+        return args.run_dir
+    spec = ModelSpec(
+        activation=args.activation,
+        depth=args.depth,
+        width=args.width,
+        use_bias=args.use_bias,
+    )
+    return (
+        args.root
+        / "experiments"
+        / f"train_{args.catalogue}"
+        / spec.experiment_name
+        / f"seed_{args.seed}"
+    )
+
+
+def checkpoint_path(args: argparse.Namespace, run_dir: Path) -> Path:
+    if args.checkpoint is not None and args.checkpoint_update is not None:
+        raise ValueError("--checkpoint and --checkpoint-update cannot be used together")
+    if args.checkpoint is not None:
+        return args.checkpoint
+    if args.checkpoint_update is not None:
+        if args.checkpoint_update <= 0:
+            raise ValueError("--checkpoint-update must be positive")
+        return run_dir / "periodic" / f"checkpoint_update_{args.checkpoint_update:09d}.pt"
+    return run_dir / "best_validation_model.pt"
 
 
 def _safe(value: Any) -> Any:
@@ -224,10 +259,11 @@ def main() -> None:
     if not args.inner_steps or any(value <= 0 for value in args.inner_steps):
         raise ValueError("inner-steps must contain positive integers")
 
-    checkpoint_path = args.checkpoint or args.run_dir / "best_validation_model.pt"
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(checkpoint_path)
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    run_dir = run_directory(args)
+    selected_checkpoint = checkpoint_path(args, run_dir)
+    if not selected_checkpoint.exists():
+        raise FileNotFoundError(selected_checkpoint)
+    checkpoint = torch.load(selected_checkpoint, map_location="cpu", weights_only=False)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA device requested but CUDA is unavailable")
@@ -244,7 +280,7 @@ def main() -> None:
     catalogues = build_catalogues()
     validation = tuple(catalogues["validation_128"])
     test = tuple(catalogues["test_256"])
-    output_dir = args.output_dir or args.run_dir / "final_evaluation"
+    output_dir = args.output_dir or run_dir / "final_evaluation"
     output_dir.mkdir(parents=True, exist_ok=True)
     update_count = int(checkpoint.get("update_count", 0))
     thresholds = FailureThresholds(
@@ -328,9 +364,18 @@ def main() -> None:
     write_json(
         output_dir / "evaluation_manifest.json",
         {
-            "checkpoint": str(checkpoint_path),
+            "checkpoint": str(selected_checkpoint),
             "checkpoint_update": update_count,
             "model_spec": asdict(spec),
+            "requested_model_spec": asdict(
+                ModelSpec(
+                    activation=args.activation,
+                    depth=args.depth,
+                    width=args.width,
+                    use_bias=args.use_bias,
+                )
+            ),
+            "run_directory": str(run_dir),
             "dtype": str(dtype).replace("torch.", ""),
             "device": str(device),
             "validation_scenarios": len(validation),

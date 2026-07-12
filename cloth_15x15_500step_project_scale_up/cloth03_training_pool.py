@@ -541,7 +541,7 @@ class LiveTrainingPool:
         residual_after = residual_after.detach()
 
         lengths = spring_lengths(y_points, params, batch.target_positions)
-        finite_y = torch.isfinite(y_points).all(dim=(-2, -1))
+        finite_y = torch.isfinite(y_points).flatten(start_dim=1).all(dim=1)
         nonfinite = (
             ~finite_y
             | ~torch.isfinite(energy_after)

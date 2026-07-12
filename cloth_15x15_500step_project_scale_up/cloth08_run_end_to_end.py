@@ -39,9 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-warmup-updates", type=int, default=20)
     parser.add_argument("--memory-measured-updates", type=int, default=100)
     parser.add_argument("--max-wall-hours", type=float, default=6.0)
+    parser.add_argument("--max-updates", type=int, default=0)
     parser.add_argument("--validation-batch-size", type=int, default=32)
     parser.add_argument("--evaluation-batch-size", type=int, default=32)
     parser.add_argument("--evaluation-frames", type=int, default=500)
+    parser.add_argument("--evaluation-checkpoint-update", type=int, default=None)
     parser.add_argument("--inner-steps", type=int, nargs="+", default=[1, 3, 10, 30])
     parser.add_argument("--skip-memory-probe", action="store_true")
     parser.add_argument("--skip-training", action="store_true")
@@ -110,6 +112,8 @@ def main() -> None:
     args = parse_args()
     if args.max_wall_hours <= 0:
         raise ValueError("max-wall-hours must be positive")
+    if args.max_updates < 0:
+        raise ValueError("max-updates must be nonnegative")
     if args.training_batch_size <= 0 or args.pool_size <= 0:
         raise ValueError("pool-size and training-batch-size must be positive")
     project_dir = Path(__file__).resolve().parent
@@ -122,6 +126,8 @@ def main() -> None:
         "catalogue": args.catalogue,
         "pool_size": args.pool_size,
         "requested_training_batch_size": args.training_batch_size,
+        "max_wall_hours": args.max_wall_hours,
+        "max_updates": args.max_updates,
         "dry_run": args.dry_run,
         "steps": {},
     }
@@ -201,6 +207,8 @@ def main() -> None:
             str(training_batch_size),
             "--max-wall-hours",
             str(args.max_wall_hours),
+            "--max-updates",
+            str(args.max_updates),
             "--validation-batch-size",
             str(args.validation_batch_size),
             "--seed",
@@ -229,6 +237,12 @@ def main() -> None:
             args.device,
             "--dtype",
             args.dtype,
+            "--activation",
+            args.activation,
+            "--depth",
+            str(args.depth),
+            "--width",
+            str(args.width),
             "--validation-frames",
             str(args.evaluation_frames),
             "--test-frames",
@@ -238,6 +252,12 @@ def main() -> None:
             "--batch-size",
             str(args.evaluation_batch_size),
         ]
+        if args.use_bias:
+            evaluate_command.append("--use-bias")
+        if args.evaluation_checkpoint_update is not None:
+            evaluate_command.extend(
+                ["--checkpoint-update", str(args.evaluation_checkpoint_update)]
+            )
         run_command(
             evaluate_command,
             log_path=logs / "03_final_evaluation.log",

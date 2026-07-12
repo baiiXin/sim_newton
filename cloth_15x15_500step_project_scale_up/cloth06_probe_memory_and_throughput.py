@@ -200,7 +200,15 @@ def device_snapshot(device: torch.device) -> dict[str, Any]:
 
 def _is_oom(error: BaseException) -> bool:
     text = str(error).lower()
-    return isinstance(error, torch.OutOfMemoryError) or "out of memory" in text
+    oom_types = tuple(
+        candidate
+        for candidate in (
+            getattr(torch, "OutOfMemoryError", None),
+            getattr(torch.cuda, "OutOfMemoryError", None),
+        )
+        if isinstance(candidate, type)
+    )
+    return isinstance(error, oom_types) or "out of memory" in text
 
 
 def _time_training_updates(
@@ -574,6 +582,14 @@ def run_parent(args: argparse.Namespace) -> int:
             f"peak_reserved={row.get('peak_reserved_gib', 'n/a')} GiB "
             f"update_mean={row.get('update_seconds_mean', 'n/a')} s"
         )
+        if row.get("status") != "success":
+            error = str(row.get("error") or "").strip()
+            if not error:
+                error = str(row.get("worker_stderr_tail") or "").strip().splitlines()[-1:]
+                error = error[0] if error else "unknown worker error"
+            error_type = row.get("error_type")
+            prefix = f"{error_type}: " if error_type else ""
+            print(f"  error={prefix}{error}", file=sys.stderr)
         if row.get("status") == "oom" and args.stop_after_oom:
             break
 

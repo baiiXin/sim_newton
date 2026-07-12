@@ -668,7 +668,12 @@ cd /data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up
 
 ```bash
 python cloth08_run_end_to_end.py \
+  --activation identity \
+  --depth 1 \
+  --width 256 \
   --device cuda:0 \
+  --max-wall-hours 6 \
+  --max-updates 0 \
   --overwrite
 ```
 
@@ -677,6 +682,8 @@ python cloth08_run_end_to_end.py \
 1. C2、pool 512、batch 32/64/128/256/512 的显存与吞吐量测试；
 2. C2、pool 512、batch 32、float64 的 6 小时正式训练；
 3. best checkpoint 的 validation/test 500 帧、K={1,3,10,30} 最终评估。
+
+本项目的在线训练池没有固定数据集 sweep 的 epoch 语义。训练量用 optimizer updates 控制：`--max-updates 0` 表示只按 `--max-wall-hours` 停止，`--max-updates N` 表示最多执行 N 次参数更新。
 
 只查看将要执行的命令，不真正运行：
 
@@ -749,8 +756,17 @@ python cloth01_build_scenario_catalogue.py --audit-only
 
 ```bash
 python cloth06_probe_memory_and_throughput.py \
-  --device cuda:0
+  --device cuda:0 \
+  --activation identity \
+  --depth 1 \
+  --width 256 \
+  --pool-size 512 \
+  --batch-sizes 32 64 128 256 512 \
+  --warmup-updates 20 \
+  --measured-updates 100
 ```
+
+需要 bias 时添加 `--use-bias`。
 
 ### 13.3 正式训练
 
@@ -760,23 +776,36 @@ python cloth05_train_scale_up.py \
   --catalogue c2 \
   --device cuda:0 \
   --dtype float64 \
+  --activation identity \
+  --depth 1 \
+  --width 256 \
   --pool-size 512 \
   --batch-size 32 \
   --k-buckets 1 3 10 30 \
   --max-wall-hours 6 \
+  --max-updates 0 \
   --overwrite
 ```
+
+需要 bias 时添加 `--use-bias`。如果要按固定参数更新数停止，例如 20000 次 optimizer updates，设置 `--max-updates 20000`。
 
 ### 13.4 最终评估
 
 ```bash
 python cloth07_evaluate_best_checkpoint.py \
-  --run-dir cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_identity_depth_01_width_0256_no_bias/seed_42 \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --activation identity \
+  --depth 1 \
+  --width 256 \
+  --seed 42 \
   --device cuda:0 \
   --validation-frames 500 \
   --test-frames 500 \
   --inner-steps 1 3 10 30
 ```
+
+默认评估 `best_validation_model.pt`。如需评估某个 periodic checkpoint，可添加 `--checkpoint-update 20000`；需要 bias 时添加 `--use-bias`。
 
 ---
 

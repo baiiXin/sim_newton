@@ -110,6 +110,7 @@ old_500step_vs_nonlinear_test_eval/
 cloth_5x5_initial_sample_ablation/
 cloth_5x5_metamizer_pool_training/
 cloth_15x15_500step_pipeline/
+cloth_15x15_scale_up_pipeline/
 # =========================
 
 ## Project-specific result folders

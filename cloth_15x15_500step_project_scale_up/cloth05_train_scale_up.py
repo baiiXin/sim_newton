@@ -310,6 +310,8 @@ def main() -> None:
     args = parse_args()
     if args.max_wall_hours <= 0:
         raise ValueError("max-wall-hours must be positive")
+    if args.max_updates < 0:
+        raise ValueError("max-updates must be nonnegative")
     for name in (
         "log_interval",
         "latest_checkpoint_interval",

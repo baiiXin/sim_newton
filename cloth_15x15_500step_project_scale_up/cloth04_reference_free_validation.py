@@ -204,7 +204,7 @@ def _run_rollout_chunk(
         ).amax(dim=(-2, -1))
 
         finite = (
-            torch.isfinite(y).all(dim=(-2, -1))
+            torch.isfinite(y).flatten(start_dim=1).all(dim=1)
             & torch.isfinite(r1)
             & torch.isfinite(e1)
             & torch.isfinite(lengths).all(dim=-1)
