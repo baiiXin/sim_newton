@@ -317,6 +317,15 @@ python cloth12_plot_model_vs_baselines.py \
 
 脚本会在同一张图上对比learned optimizer、GD、Adam、L-BFGS、BFGS和Newton，并分别绘制mean、p95和max residual vs. iteration。
 
+`--experiment-dir` 每次只接收一个模型实验目录，目录中必须已经存在 `evaluation_curves.pt`。如果当前工作目录已经是 `cloth_15x15_500step_project/`，则路径应写成：
+
+```bash
+python cloth12_plot_model_vs_baselines.py \
+  --root cloth_15x15_500step_pipeline \
+  --experiment-dir cloth_15x15_500step_pipeline/experiments/STAGE/samples_XXXX/EXPERIMENT_NAME \
+  --model-label learned_optimizer
+```
+
 ---
 
 ## 6. 网络实验顺序
@@ -391,6 +400,44 @@ python cloth05_train_models.py \
 Bias不仅增加参数量，还破坏“零residual必然产生零更新”的结构性质，因此应作为求解器结构消融解释。
 
 “宽度→深度→激活与bias”属于贪心搜索。建议Stage 1和Stage 2后补充 `top-2 widths × top-2 depths` 共4组交叉实验。
+
+### 6.1 单模型训练输出
+
+每个 `cloth05_train_models.py` 模型实验目录会保存：
+
+```text
+experiments/STAGE/samples_XXXX/EXPERIMENT_NAME/
+├── train_log.csv
+├── validation_metrics.json
+├── best_validation_model.pt
+├── best_validation_summary.json
+├── evaluation_metrics.json
+├── evaluation_curves.pt
+├── test_metrics.json
+├── test_curves.pt
+├── training_summary.json
+├── completed.json
+└── figures/
+    ├── training_loss.png
+    ├── validation_final_residual_overview.png
+    ├── validation_xn_residual_vs_iteration.png
+    ├── test_id_xn_residual_vs_iteration.png
+    ├── test_ood_xn_residual_vs_iteration.png
+    └── test_all_xn_residual_vs_iteration.png
+```
+
+`training_summary.json` 和 `completed.json` 中会显式记录：
+
+```text
+best_checkpoint_epoch
+total_training_elapsed_seconds
+```
+
+其中 `total_training_elapsed_seconds` 是 `train_log.csv` 中所有epoch训练循环 `elapsed_seconds` 的总和，不包含最终validation/test评估绘图时间。
+
+`figures/training_loss.png` 绘制训练loss随epoch变化；`figures/validation_final_residual_overview.png` 绘制每个验证节点处第50次内层迭代后的 `mean`、`p95`、`max` residual。两张图都会用黑色虚线标出 `best_checkpoint_epoch`。
+
+对于已经完成的旧实验，重新运行带 `--skip-completed` 的训练命令时，会先从已有 `train_log.csv` 和 `validation_metrics.json` 补齐上述训练诊断文件，然后跳过重训。
 
 ---
 
@@ -475,6 +522,55 @@ python cloth07_rollout_hardest_motion.py \
   --device cuda:0
 ```
 
+主要输出：
+
+```text
+rollouts/motion_XXX/EXPERIMENT_NAME/
+├── curve.pt
+└── curve.json
+```
+
+`curve.pt` 保存连续rollout的positions、velocities、每帧每次内层迭代residual、每帧reference error和每帧耗时；`curve.json` 保存motion、checkpoint、输出路径和完成帧数摘要。
+
+渲染rollout：
+
+```bash
+python cloth14_render_rollout.py \
+  --root cloth_15x15_500step_pipeline \
+  --rollout cloth_15x15_500step_pipeline/rollouts/motion_XXX/EXPERIMENT_NAME/curve.pt \
+  --format mp4 \
+  --fps 30
+```
+
+默认输出到同目录：
+
+```text
+rollouts/motion_XXX/EXPERIMENT_NAME/curve.mp4
+```
+
+渲染图中蓝色为模型rollout，灰色为reference对照，红色方块为固定点。标题显示当前帧、该物理帧最后一次内层迭代residual和相对reference的位置误差。
+
+如果500帧渲染较慢，可以使用降采样：
+
+```bash
+python cloth14_render_rollout.py \
+  --root cloth_15x15_500step_pipeline \
+  --rollout cloth_15x15_500step_pipeline/rollouts/motion_XXX/EXPERIMENT_NAME/curve.pt \
+  --format mp4 \
+  --stride 5 \
+  --fps 30
+```
+
+如果环境没有可用的FFmpeg，可改用GIF：
+
+```bash
+python cloth14_render_rollout.py \
+  --root cloth_15x15_500step_pipeline \
+  --rollout cloth_15x15_500step_pipeline/rollouts/motion_XXX/EXPERIMENT_NAME/curve.pt \
+  --format gif \
+  --stride 5
+```
+
 ---
 
 ## 10. 显存测试
@@ -511,6 +607,7 @@ cloth10_prepare_initial_point_ablation.py  x_n前缀初值数据
 cloth11_train_initial_point_ablation.py 初值数量实验启动器
 cloth12_plot_model_vs_baselines.py      模型与baseline曲线对比
 cloth13_train_pool.py                   live training pool训练
+cloth14_render_rollout.py               渲染连续rollout结果
 ```
 
 ---
