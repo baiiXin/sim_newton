@@ -135,7 +135,7 @@ def summarize_motion_rows(
         "survival_rate": float(sum(not item for item in failed) / len(rows)),
         "survival_frame_p05": float(np.quantile(np.asarray(survival), 0.05)),
         "survival_frame_median": float(np.quantile(np.asarray(survival), 0.50)),
-        "residual_ratio_p95": float(np.quantile(np.asarray(selection), 0.95)),
+        "residual_ratio_p95": finite_quantile(selection, 0.95, float("inf")),
         "energy_increase_fraction": float(np.mean(energy_fraction)),
         "final_residual_p95": finite_quantile(final_residual, 0.95, float("inf")),
         "final_residual_max": finite_quantile(final_residual, 1.00, float("inf")),
