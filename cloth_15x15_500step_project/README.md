@@ -513,10 +513,60 @@ Rollout与离线验证/测试不同：预测状态会传播到下一物理帧。
 
 默认在原测试motion `20–31` 中去掉人工排除和reference非有限motion，然后选择reference residual p95最高的motion，连续rollout 500帧，每帧默认50次网络迭代。
 
+MLP rollout：
+
 ```bash
 python cloth07_rollout_hardest_motion.py \
   --root cloth_15x15_500step_pipeline \
+  --solver mlp \
   --checkpoint PATH/TO/best_validation_model.pt \
+  --rollout-length 500 \
+  --inner-steps 50 \
+  --device cuda:0
+```
+
+如果要指定motion，而不是自动选择hardest test motion，增加：
+
+```bash
+  --motion-index 26
+```
+
+Baseline rollout使用同一个入口。默认会读取 `baselines/parameter_selection.json` 中验证集选出的参数：
+
+```bash
+python cloth07_rollout_hardest_motion.py \
+  --root cloth_15x15_500step_pipeline \
+  --solver adam \
+  --motion-index 26 \
+  --rollout-length 500 \
+  --inner-steps 50 \
+  --device cuda:0
+```
+
+可选solver：
+
+```text
+mlp, gd, adam, lbfgs, bfgs, newton
+```
+
+也可以手动覆盖baseline参数：
+
+```bash
+python cloth07_rollout_hardest_motion.py \
+  --root cloth_15x15_500step_pipeline \
+  --solver gd \
+  --gd-step-size 5e-5 \
+  --motion-index 26 \
+  --rollout-length 500 \
+  --inner-steps 50 \
+  --device cuda:0
+
+python cloth07_rollout_hardest_motion.py \
+  --root cloth_15x15_500step_pipeline \
+  --solver lbfgs \
+  --initial-step 1.0 \
+  --lbfgs-history-size 10 \
+  --motion-index 26 \
   --rollout-length 500 \
   --inner-steps 50 \
   --device cuda:0
@@ -527,10 +577,15 @@ python cloth07_rollout_hardest_motion.py \
 ```text
 rollouts/motion_XXX/EXPERIMENT_NAME/
 ├── curve.pt
-└── curve.json
+├── curve.json
+└── figures/
+    ├── residual_vs_timestep.png
+    └── worst_frame_residual_vs_iteration.png
 ```
 
 `curve.pt` 保存连续rollout的positions、velocities、每帧每次内层迭代residual、每帧reference error和每帧耗时；`curve.json` 保存motion、checkpoint、输出路径和完成帧数摘要。
+
+`figures/residual_vs_timestep.png` 绘制每个物理帧结束时的final residual；脚本会自动选择final residual最大的物理帧，并在 `figures/worst_frame_residual_vs_iteration.png` 中绘制该帧内部的 residual vs. inner iteration。
 
 渲染rollout：
 
@@ -570,6 +625,18 @@ python cloth14_render_rollout.py \
   --format gif \
   --stride 5
 ```
+
+批量渲染尚未渲染的rollout时，可以不传 `--rollout`。脚本会扫描 `cloth_15x15_500step_pipeline/rollouts/**/curve.pt`，跳过已经存在同格式输出文件的结果，只渲染剩余项：
+
+```bash
+python cloth14_render_rollout.py \
+  --root cloth_15x15_500step_pipeline \
+  --format mp4 \
+  --stride 5 \
+  --fps 30
+```
+
+如需重新覆盖已有渲染，增加 `--overwrite`。
 
 ---
 
