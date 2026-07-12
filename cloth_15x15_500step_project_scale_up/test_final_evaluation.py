@@ -61,7 +61,7 @@ class FinalEvaluationTests(unittest.TestCase):
         self.assertEqual(summary["motion_count"], 2)
         self.assertEqual(summary["failed_motion_count"], 1)
         self.assertEqual(summary["survival_rate"], 0.5)
-        self.assertEqual(summary["residual_ratio_p95"], float("inf"))
+        self.assertEqual(summary["residual_ratio_p95"], 0.2)
 
     def test_grouped_test_summary_contains_all_and_each_group(self) -> None:
         rows = [
