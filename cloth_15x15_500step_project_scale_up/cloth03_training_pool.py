@@ -33,20 +33,20 @@ from cloth02_batched_physics import (
 from scenario_templates import ScenarioSpec
 
 
-DEFAULT_POOL_SIZE = 512
-DEFAULT_BATCH_SIZE = 32
+DEFAULT_POOL_SIZE = 2048
+DEFAULT_BATCH_SIZE = 256
 DEFAULT_K_BUCKETS = (1, 3, 10, 30)
-DEFAULT_ENVIRONMENT_LIFETIME_FRAMES = 64
+DEFAULT_ENVIRONMENT_LIFETIME_FRAMES = 500
 DEFAULT_RESIDUAL_LENGTH_SCALE = 5e-2
 DEFAULT_GRADIENT_CLIP_NORM = 10.0
-DEFAULT_LEARNING_RATE = 1e-3
+DEFAULT_LEARNING_RATE = 1e-4
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    activation: str = "identity"
+    activation: str = "relu"
     depth: int = 1
-    width: int = 256
+    width: int = 2048
     use_bias: bool = False
 
     @property
@@ -479,11 +479,11 @@ class LiveTrainingPool:
         self.q.index_copy_(0, rows, q)
         self.target_positions.index_copy_(0, rows, targets)
         self.y.index_copy_(0, rows, y)
-        self.previous_residual[rows].zero_()
-        self.previous_update[rows].zero_()
-        self.inner_iteration[rows].zero_()
-        self.physical_step[rows].zero_()
-        self.age_physical_step[rows].zero_()
+        self.previous_residual.index_fill_(0, rows, 0.0)
+        self.previous_update.index_fill_(0, rows, 0.0)
+        self.inner_iteration.index_fill_(0, rows, 0)
+        self.physical_step.index_fill_(0, rows, 0)
+        self.age_physical_step.index_fill_(0, rows, 0)
 
     def _take_cyclic_rows(self, k_value: int) -> torch.Tensor:
         rows = self.rows_by_k[k_value]
@@ -577,7 +577,11 @@ class LiveTrainingPool:
                 good_rows,
                 current_residual.index_select(0, good_rows_local),
             )
-            self.inner_iteration[good_rows] += 1
+            self.inner_iteration.index_add_(
+                0,
+                good_rows,
+                torch.ones_like(good_rows, dtype=self.inner_iteration.dtype),
+            )
 
         completed_local = torch.nonzero(
             (~bad)
@@ -602,8 +606,12 @@ class LiveTrainingPool:
             )
             self.p.index_copy_(0, completed_rows, p_next)
             self.v.index_copy_(0, completed_rows, v_next)
-            self.physical_step[completed_rows] = next_steps
-            self.age_physical_step[completed_rows] += 1
+            self.physical_step.index_copy_(0, completed_rows, next_steps)
+            self.age_physical_step.index_add_(
+                0,
+                completed_rows,
+                torch.ones_like(completed_rows, dtype=self.age_physical_step.dtype),
+            )
             q_next = make_q(p_next, v_next, completed_params)
             solve_time = (
                 next_steps.to(completed_params.dtype) + 1.0
@@ -613,9 +621,9 @@ class LiveTrainingPool:
             self.q.index_copy_(0, completed_rows, q_next)
             self.target_positions.index_copy_(0, completed_rows, targets_next)
             self.y.index_copy_(0, completed_rows, y0_next)
-            self.previous_residual[completed_rows].zero_()
-            self.previous_update[completed_rows].zero_()
-            self.inner_iteration[completed_rows].zero_()
+            self.previous_residual.index_fill_(0, completed_rows, 0.0)
+            self.previous_update.index_fill_(0, completed_rows, 0.0)
+            self.inner_iteration.index_fill_(0, completed_rows, 0)
             self.total_completed_physical_frames += int(completed_rows.numel())
 
         lifetime_local = torch.nonzero(

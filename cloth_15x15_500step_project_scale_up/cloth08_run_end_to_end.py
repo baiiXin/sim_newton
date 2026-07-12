@@ -9,7 +9,12 @@ import sys
 import time
 from typing import Any, Sequence
 
-from cloth03_training_pool import ModelSpec
+from cloth03_training_pool import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_ENVIRONMENT_LIFETIME_FRAMES,
+    DEFAULT_POOL_SIZE,
+    ModelSpec,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,24 +27,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
     parser.add_argument("--catalogue", choices=("c1", "c2", "c3"), default="c2")
-    parser.add_argument("--activation", default="identity")
-    parser.add_argument("--depth", type=int, default=1)
-    parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--use-bias", action="store_true")
+    parser.add_argument("--activation", default=ModelSpec().activation)
+    parser.add_argument("--depth", type=int, default=ModelSpec().depth)
+    parser.add_argument("--width", type=int, default=ModelSpec().width)
+    parser.add_argument(
+        "--use-bias",
+        action=argparse.BooleanOptionalAction,
+        default=ModelSpec().use_bias,
+    )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--pool-size", type=int, default=512)
-    parser.add_argument("--training-batch-size", type=int, default=32)
+    parser.add_argument("--pool-size", type=int, default=DEFAULT_POOL_SIZE)
+    parser.add_argument("--training-batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument(
+        "--max-lifetime-physical-steps",
+        type=int,
+        default=DEFAULT_ENVIRONMENT_LIFETIME_FRAMES,
+    )
     parser.add_argument("--use-recommended-batch", action="store_true")
     parser.add_argument(
         "--memory-batch-sizes",
         type=int,
         nargs="+",
-        default=[32, 64, 128, 256, 512],
+        default=[32, 64, 128, 256, 512, 1024, 2048],
     )
     parser.add_argument("--memory-warmup-updates", type=int, default=20)
     parser.add_argument("--memory-measured-updates", type=int, default=100)
-    parser.add_argument("--max-wall-hours", type=float, default=6.0)
-    parser.add_argument("--max-updates", type=int, default=0)
+    parser.add_argument("--max-wall-hours", type=float, default=10.0)
+    parser.add_argument("--max-updates", type=int, default=3000000)
     parser.add_argument("--validation-batch-size", type=int, default=32)
     parser.add_argument("--evaluation-batch-size", type=int, default=32)
     parser.add_argument("--evaluation-frames", type=int, default=500)
@@ -116,6 +130,8 @@ def main() -> None:
         raise ValueError("max-updates must be nonnegative")
     if args.training_batch_size <= 0 or args.pool_size <= 0:
         raise ValueError("pool-size and training-batch-size must be positive")
+    if args.max_lifetime_physical_steps <= 0:
+        raise ValueError("max-lifetime-physical-steps must be positive")
     project_dir = Path(__file__).resolve().parent
     logs = args.root / "pipeline_logs"
     memory_dir = args.root / "profiling" / "memory_probe"
@@ -128,6 +144,7 @@ def main() -> None:
         "requested_training_batch_size": args.training_batch_size,
         "max_wall_hours": args.max_wall_hours,
         "max_updates": args.max_updates,
+        "max_lifetime_physical_steps": args.max_lifetime_physical_steps,
         "dry_run": args.dry_run,
         "steps": {},
     }
@@ -161,8 +178,7 @@ def main() -> None:
             "--seed",
             str(args.seed),
         ]
-        if args.use_bias:
-            memory_command.append("--use-bias")
+        memory_command.append("--use-bias" if args.use_bias else "--no-use-bias")
         run_command(
             memory_command,
             log_path=logs / "01_memory_probe.log",
@@ -209,13 +225,14 @@ def main() -> None:
             str(args.max_wall_hours),
             "--max-updates",
             str(args.max_updates),
+            "--max-lifetime-physical-steps",
+            str(args.max_lifetime_physical_steps),
             "--validation-batch-size",
             str(args.validation_batch_size),
             "--seed",
             str(args.seed),
         ]
-        if args.use_bias:
-            train_command.append("--use-bias")
+        train_command.append("--use-bias" if args.use_bias else "--no-use-bias")
         if args.resume:
             train_command.append("--resume")
         if args.overwrite:
@@ -252,8 +269,7 @@ def main() -> None:
             "--batch-size",
             str(args.evaluation_batch_size),
         ]
-        if args.use_bias:
-            evaluate_command.append("--use-bias")
+        evaluate_command.append("--use-bias" if args.use_bias else "--no-use-bias")
         if args.evaluation_checkpoint_update is not None:
             evaluate_command.extend(
                 ["--checkpoint-update", str(args.evaluation_checkpoint_update)]

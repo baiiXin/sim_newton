@@ -30,10 +30,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--catalogue", choices=("c1", "c2", "c3"), default="c2")
-    parser.add_argument("--activation", default="identity")
-    parser.add_argument("--depth", type=int, default=1)
-    parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--use-bias", action="store_true")
+    parser.add_argument("--activation", default=ModelSpec().activation)
+    parser.add_argument("--depth", type=int, default=ModelSpec().depth)
+    parser.add_argument("--width", type=int, default=ModelSpec().width)
+    parser.add_argument(
+        "--use-bias",
+        action=argparse.BooleanOptionalAction,
+        default=ModelSpec().use_bias,
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--checkpoint", type=Path, default=None)

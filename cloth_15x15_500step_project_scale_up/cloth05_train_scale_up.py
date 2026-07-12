@@ -52,10 +52,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
-    parser.add_argument("--activation", default="identity")
-    parser.add_argument("--depth", type=int, default=1)
-    parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--use-bias", action="store_true")
+    parser.add_argument("--activation", default=ModelSpec().activation)
+    parser.add_argument("--depth", type=int, default=ModelSpec().depth)
+    parser.add_argument("--width", type=int, default=ModelSpec().width)
+    parser.add_argument(
+        "--use-bias",
+        action=argparse.BooleanOptionalAction,
+        default=ModelSpec().use_bias,
+    )
     parser.add_argument(
         "--residual-length-scale",
         type=float,
@@ -81,11 +85,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_GRADIENT_CLIP_NORM,
     )
     parser.add_argument("--step-regularization-weight", type=float, default=0.0)
-    parser.add_argument("--max-wall-hours", type=float, default=6.0)
-    parser.add_argument("--max-updates", type=int, default=0)
+    parser.add_argument("--max-wall-hours", type=float, default=10.0)
+    parser.add_argument("--max-updates", type=int, default=3000000)
     parser.add_argument("--log-interval", type=int, default=100)
-    parser.add_argument("--latest-checkpoint-interval", type=int, default=1000)
-    parser.add_argument("--periodic-checkpoint-interval", type=int, default=10000)
+    parser.add_argument("--latest-checkpoint-interval", type=int, default=5000)
+    parser.add_argument("--periodic-checkpoint-interval", type=int, default=25000)
     parser.add_argument(
         "--fast-validation-interval",
         type=int,

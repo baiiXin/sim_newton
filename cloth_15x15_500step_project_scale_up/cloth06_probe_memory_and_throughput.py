@@ -27,6 +27,7 @@ from cloth03_training_pool import (
     DEFAULT_GRADIENT_CLIP_NORM,
     DEFAULT_K_BUCKETS,
     DEFAULT_LEARNING_RATE,
+    DEFAULT_POOL_SIZE,
     DEFAULT_RESIDUAL_LENGTH_SCALE,
     LearnedOptimizerMLP,
     LiveTrainingPool,
@@ -48,21 +49,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--catalogue", choices=("c1", "c2", "c3"), default="c2")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
-    parser.add_argument("--activation", default="identity")
-    parser.add_argument("--depth", type=int, default=1)
-    parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--use-bias", action="store_true")
+    parser.add_argument("--activation", default=ModelSpec().activation)
+    parser.add_argument("--depth", type=int, default=ModelSpec().depth)
+    parser.add_argument("--width", type=int, default=ModelSpec().width)
+    parser.add_argument(
+        "--use-bias",
+        action=argparse.BooleanOptionalAction,
+        default=ModelSpec().use_bias,
+    )
     parser.add_argument(
         "--residual-length-scale",
         type=float,
         default=DEFAULT_RESIDUAL_LENGTH_SCALE,
     )
-    parser.add_argument("--pool-size", type=int, default=512)
+    parser.add_argument("--pool-size", type=int, default=DEFAULT_POOL_SIZE)
     parser.add_argument(
         "--batch-sizes",
         type=int,
         nargs="+",
-        default=[32, 64, 128, 256, 512],
+        default=[32, 64, 128, 256, 512, 1024, 2048],
     )
     parser.add_argument(
         "--k-buckets",
@@ -473,8 +478,7 @@ def worker_command(args: argparse.Namespace, batch_size: int, result_file: Path)
         "--memory-headroom-fraction",
         str(args.memory_headroom_fraction),
     ]
-    if args.use_bias:
-        command.append("--use-bias")
+    command.append("--use-bias" if args.use_bias else "--no-use-bias")
     return command
 
 

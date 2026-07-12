@@ -159,6 +159,11 @@ class TrainingPoolTests(unittest.TestCase):
         self.assertFalse(torch.equal(old, pool.scenario_indices))
         self.assertEqual(pool.reset_counts["resets_lifetime"], 4)
         self.assertEqual(pool.total_completed_physical_frames, 4)
+        self.assertTrue(torch.equal(pool.inner_iteration, torch.zeros_like(pool.inner_iteration)))
+        self.assertTrue(torch.equal(pool.physical_step, torch.zeros_like(pool.physical_step)))
+        self.assertTrue(torch.equal(pool.age_physical_step, torch.zeros_like(pool.age_physical_step)))
+        self.assertTrue(torch.equal(pool.previous_residual, torch.zeros_like(pool.previous_residual)))
+        self.assertTrue(torch.equal(pool.previous_update, torch.zeros_like(pool.previous_update)))
 
     def test_pool_state_roundtrip(self) -> None:
         pool = self.make_pool()

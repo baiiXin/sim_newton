@@ -319,9 +319,9 @@ $$
 默认网络：
 
 ```text
-activation = identity
+activation = relu
 depth      = 1
-width      = 256
+width      = 2048
 bias       = False
 dtype      = float64
 ```
@@ -355,18 +355,19 @@ $$
 
 ```text
 training catalogue          C2 = 2048 scenarios
-live environments           512
-mini-batch size             32
+live environments           2048
+mini-batch size             256
 K buckets                   1 / 3 / 10 / 30
-environments per K          128
-batch samples per K         8
-environment lifetime        64 physical frames
-learning rate               1e-3
+environments per K          512
+batch samples per K         64
+environment lifetime        500 physical frames
+learning rate               1e-4
 gradient clipping           10
-wall-clock limit            6 hours
+wall-clock limit            10 hours
+optimizer update limit      3000000
 ```
 
-一次 `optimizer.step()` 只给 batch 中 32 个环境各执行一次 learned update。
+一次 `optimizer.step()` 给 batch 中 256 个环境各执行一次 learned update。
 
 某个环境累计完成自身的 K 次 learned update 后，才推进一个物理帧。新物理帧从：
 
@@ -452,7 +453,7 @@ $$
 motions           32
 rollout frames    32
 inner steps       10
-interval          2000 optimizer updates
+interval          10000 optimizer updates
 select checkpoint 否
 ```
 
@@ -464,7 +465,7 @@ select checkpoint 否
 motions           128
 rollout frames    100
 inner steps       10
-interval          10000 optimizer updates
+interval          50000 optimizer updates
 select checkpoint 是
 ```
 
@@ -556,7 +557,7 @@ periodic/checkpoint_update_XXXXXXXXX.pt
 显存脚本在独立 Python 子进程中分别测试：
 
 ```text
-batch size = 32 / 64 / 128 / 256 / 512
+batch size = 32 / 64 / 128 / 256 / 512 / 1024 / 2048
 ```
 
 每个配置执行完整链路：
@@ -590,7 +591,7 @@ profiling/memory_probe/
 
 脚本会记录峰值显存、update mean/p50/p95、environment updates/s，以及根据实测吞吐量估算的 6 小时训练规模。
 
-默认正式训练仍使用 batch 32。只有显式添加 `--use-recommended-batch` 时，一键脚本才使用吞吐量推荐值。
+默认正式训练使用 `relu/depth=1/width=2048/bias=False`、`pool-size=2048`、`batch-size=256`。如果更换模型、batch 或机器，应重新运行显存测试确认。
 
 ---
 
@@ -668,19 +669,22 @@ cd /data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up
 
 ```bash
 python cloth08_run_end_to_end.py \
-  --activation identity \
+  --activation relu \
   --depth 1 \
-  --width 256 \
+  --width 2048 \
   --device cuda:0 \
-  --max-wall-hours 6 \
-  --max-updates 0 \
+  --pool-size 2048 \
+  --training-batch-size 256 \
+  --max-lifetime-physical-steps 500 \
+  --max-wall-hours 10 \
+  --max-updates 3000000 \
   --overwrite
 ```
 
 该命令依次执行：
 
-1. C2、pool 512、batch 32/64/128/256/512 的显存与吞吐量测试；
-2. C2、pool 512、batch 32、float64 的 6 小时正式训练；
+1. C2、pool 2048、batch 32/64/128/256/512/1024/2048 的显存与吞吐量测试；
+2. C2、pool 2048、batch 256、float64、500 帧环境寿命的 10 小时正式训练，最多 3000000 次 optimizer updates；
 3. best checkpoint 的 validation/test 500 帧、K={1,3,10,30} 最终评估。
 
 本项目的在线训练池没有固定数据集 sweep 的 epoch 语义。训练量用 optimizer updates 控制：`--max-updates 0` 表示只按 `--max-wall-hours` 停止，`--max-updates N` 表示最多执行 N 次参数更新。
@@ -757,37 +761,48 @@ python cloth01_build_scenario_catalogue.py --audit-only
 ```bash
 python cloth06_probe_memory_and_throughput.py \
   --device cuda:0 \
-  --activation identity \
+  --activation relu \
   --depth 1 \
-  --width 256 \
-  --pool-size 512 \
-  --batch-sizes 32 64 128 256 512 \
+  --width 2048 \
+  --pool-size 2048 \
+  --batch-sizes 32 64 128 256 512 1024 2048 \
   --warmup-updates 20 \
   --measured-updates 100
 ```
 
-需要 bias 时添加 `--use-bias`。
+默认不启用 bias；如需启用，添加 `--use-bias`。
 
 ### 13.3 正式训练
 
 ```bash
-python cloth05_train_scale_up.py \
+python cloth05_train_scale_up_robust.py \
   --root cloth_15x15_scale_up_pipeline \
   --catalogue c2 \
   --device cuda:0 \
   --dtype float64 \
-  --activation identity \
+  --activation relu \
   --depth 1 \
-  --width 256 \
-  --pool-size 512 \
-  --batch-size 32 \
+  --width 2048 \
+  --pool-size 2048 \
+  --batch-size 256 \
   --k-buckets 1 3 10 30 \
-  --max-wall-hours 6 \
-  --max-updates 0 \
+  --max-lifetime-physical-steps 500 \
+  --learning-rate 1e-4 \
+  --gradient-clip-norm 10 \
+  --step-regularization-weight 0 \
+  --max-updates 3000000 \
+  --max-wall-hours 10 \
+  --log-interval 100 \
+  --latest-checkpoint-interval 5000 \
+  --periodic-checkpoint-interval 25000 \
+  --fast-validation-interval 10000 \
+  --checkpoint-validation-interval 50000 \
+  --validation-batch-size 32 \
+  --seed 42 \
   --overwrite
 ```
 
-需要 bias 时添加 `--use-bias`。如果要按固定参数更新数停止，例如 20000 次 optimizer updates，设置 `--max-updates 20000`。
+默认不启用 bias；如需启用，添加 `--use-bias`。如果要按固定参数更新数停止，例如 3000000 次 optimizer updates，设置 `--max-updates 3000000`。
 
 ### 13.4 最终评估
 
@@ -795,9 +810,9 @@ python cloth05_train_scale_up.py \
 python cloth07_evaluate_best_checkpoint.py \
   --root cloth_15x15_scale_up_pipeline \
   --catalogue c2 \
-  --activation identity \
+  --activation relu \
   --depth 1 \
-  --width 256 \
+  --width 2048 \
   --seed 42 \
   --device cuda:0 \
   --validation-frames 500 \
@@ -805,7 +820,7 @@ python cloth07_evaluate_best_checkpoint.py \
   --inner-steps 1 3 10 30
 ```
 
-默认评估 `best_validation_model.pt`。如需评估某个 periodic checkpoint，可添加 `--checkpoint-update 20000`；需要 bias 时添加 `--use-bias`。
+默认评估 `best_validation_model.pt`。如需评估某个 periodic checkpoint，可添加 `--checkpoint-update 20000`；如需启用 bias，添加 `--use-bias`。
 
 ---
 

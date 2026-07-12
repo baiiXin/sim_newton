@@ -27,7 +27,7 @@ FAST_MONITOR = ValidationProtocol(
     motion_count=32,
     rollout_frames=32,
     inner_steps=10,
-    interval_updates=2_000,
+    interval_updates=10_000,
     selects_checkpoint=False,
 )
 
@@ -36,7 +36,7 @@ CHECKPOINT_VALIDATION = ValidationProtocol(
     motion_count=128,
     rollout_frames=100,
     inner_steps=10,
-    interval_updates=10_000,
+    interval_updates=50_000,
     selects_checkpoint=True,
 )
 
