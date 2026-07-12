@@ -30,6 +30,12 @@ from cloth03_solvers_and_models import (
     stationarity_residual_norm_full,
     variational_energy_full,
 )
+from cloth05_train_models import (
+    best_validation_from_history,
+    load_training_log,
+    load_validation_history,
+    save_training_diagnostics,
+)
 from cloth_common import (
     evaluate_model_iterations,
     load_json,
@@ -52,7 +58,7 @@ _spec.loader.exec_module(_shared)
 ClothPool = _shared.ClothPool
 
 
-def save_checkpoint(path, model, optimizer, epoch, updates, spec, best, config):
+def save_checkpoint(path, model, optimizer, epoch, updates, spec, best, config, best_epoch=None):
     torch.save(
         {
             "epoch": epoch,
@@ -61,6 +67,7 @@ def save_checkpoint(path, model, optimizer, epoch, updates, spec, best, config):
             "optimizer_state_dict": optimizer.state_dict(),
             "model_spec": asdict(spec),
             "best_validation": best,
+            "best_validation_epoch": None if best_epoch is None else int(best_epoch),
             "config": config,
         },
         path,
@@ -127,6 +134,8 @@ def main() -> None:
         / spec.experiment_name
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    figure_dir = output_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -135,6 +144,7 @@ def main() -> None:
     start_epoch, best, update_count = 1, math.inf, 0
     logs = []
     validation_history = []
+    best_epoch = None
     latest = output_dir / "latest_checkpoint.pt"
     config = {
         "sample_count": 0,
@@ -156,6 +166,10 @@ def main() -> None:
     }
     save_json(config, output_dir / "config.json")
 
+    if args.resume and not args.overwrite:
+        logs = load_training_log(output_dir / "train_log.csv")
+        validation_history = load_validation_history(output_dir / "validation_metrics.json")
+        best_epoch, best = best_validation_from_history(validation_history)
     if args.resume and latest.exists() and not args.overwrite:
         saved = torch.load(latest, map_location=device)
         model.load_state_dict(saved["model_state_dict"])
@@ -163,6 +177,9 @@ def main() -> None:
         start_epoch = int(saved["epoch"]) + 1
         best = float(saved.get("best_validation", math.inf))
         update_count = int(saved.get("update_count", 0))
+        saved_best_epoch = saved.get("best_validation_epoch")
+        if saved_best_epoch is not None:
+            best_epoch = int(saved_best_epoch)
 
     pool = ClothPool(
         motions=motions,
@@ -250,6 +267,7 @@ def main() -> None:
             spec,
             best,
             config,
+            best_epoch,
         )
 
         if (
@@ -279,6 +297,7 @@ def main() -> None:
             best_path = output_dir / "best_validation_model.pt"
             if (not best_path.exists()) or score < best:
                 best = score
+                best_epoch = epoch
                 save_checkpoint(
                     best_path,
                     model,
@@ -288,17 +307,39 @@ def main() -> None:
                     spec,
                     best,
                     config,
+                    best_epoch,
                 )
                 torch.save(
                     validation_result["curve"],
                     output_dir / "best_validation_curve.pt",
                 )
+            save_checkpoint(
+                latest,
+                model,
+                optimizer,
+                epoch,
+                update_count,
+                spec,
+                best,
+                config,
+                best_epoch,
+            )
             print(
                 f"pool epoch={epoch}/{args.epochs} "
                 f"loss={row['loss_mean']:.3e} "
                 f"validation_final_p95={score:.3e} "
                 f"resets={row['resets_total']}"
             )
+
+    training_summary = save_training_diagnostics(
+        out=output_dir,
+        figure_dir=figure_dir,
+        logs=logs,
+        history=validation_history,
+        best=best,
+        best_epoch=best_epoch,
+        completed_epoch=args.epochs,
+    )
 
     best_checkpoint = torch.load(
         output_dir / "best_validation_model.pt", map_location=device
@@ -329,7 +370,12 @@ def main() -> None:
         output_dir / "test_curves.pt",
     )
     save_json(
-        {"completed": True, "best_validation": best},
+        {
+            "completed": True,
+            "best_validation": best,
+            "best_checkpoint_epoch": best_epoch,
+            "total_training_elapsed_seconds": training_summary["total_training_elapsed_seconds"],
+        },
         output_dir / "completed.json",
     )
 

@@ -8,6 +8,7 @@ propagated into the next physical frame.
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import time
 from dataclasses import asdict
@@ -235,7 +236,7 @@ def model_specs(args: argparse.Namespace) -> list[ModelSpec]:
     return [specs[args.config_index]] if args.config_index is not None else specs
 
 
-def checkpoint(path: Path, model, optimizer, epoch, spec, best, config):
+def checkpoint(path: Path, model, optimizer, epoch, spec, best, config, best_epoch=None):
     torch.save(
         {
             "epoch": int(epoch),
@@ -243,6 +244,7 @@ def checkpoint(path: Path, model, optimizer, epoch, spec, best, config):
             "optimizer_state_dict": optimizer.state_dict(),
             "model_spec": asdict(spec),
             "best_validation": float(best),
+            "best_validation_epoch": None if best_epoch is None else int(best_epoch),
             "config": config,
         },
         path,
@@ -267,6 +269,121 @@ def plot_residual_summary(summary: dict[str, Any], path: Path, title: str) -> No
     plt.close(fig)
 
 
+def _coerce_csv_value(value: str) -> Any:
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    if math.isfinite(number) and number.is_integer():
+        return int(number)
+    return number
+
+
+def load_training_log(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return [
+            {key: _coerce_csv_value(value) for key, value in row.items()}
+            for row in csv.DictReader(handle)
+        ]
+
+
+def load_validation_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return list(load_json(path).get("history", []))
+
+
+def best_validation_from_history(history: list[dict[str, Any]]) -> tuple[int | None, float]:
+    if not history:
+        return None, math.inf
+    best_record = min(history, key=lambda row: float(row.get("selection_metric", math.inf)))
+    return int(best_record["epoch"]), float(best_record.get("selection_metric", math.inf))
+
+
+def plot_training_loss(logs: list[dict[str, Any]], best_epoch: int | None, path: Path) -> None:
+    if not logs:
+        return
+    epochs = np.asarray([int(row["epoch"]) for row in logs], dtype=int)
+    losses = np.asarray([float(row["loss_mean"]) for row in logs], dtype=float)
+    finite = np.isfinite(losses)
+    if not finite.any():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(epochs[finite], np.maximum(losses[finite], 1e-30), label="training loss", linewidth=1.8)
+    if best_epoch is not None:
+        ax.axvline(best_epoch, color="black", linestyle="--", linewidth=1.2, label=f"best epoch {best_epoch}")
+    ax.set_yscale("log")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("mean training loss")
+    ax.set_title("training loss")
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def plot_validation_overview(history: list[dict[str, Any]], best_epoch: int | None, path: Path) -> None:
+    if not history:
+        return
+    epochs = np.asarray([int(row["epoch"]) for row in history], dtype=int)
+    fields = {
+        "mean": "final_residual_mean",
+        "p95": "final_residual_p95",
+        "max": "final_residual_max",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for label, field in fields.items():
+        values = np.asarray([float(row[field]) for row in history], dtype=float)
+        finite = np.isfinite(values)
+        if finite.any():
+            ax.plot(epochs[finite], np.maximum(values[finite], 1e-30), marker="o", markersize=3, label=label)
+    if best_epoch is not None:
+        ax.axvline(best_epoch, color="black", linestyle="--", linewidth=1.2, label=f"best epoch {best_epoch}")
+    ax.set_yscale("log")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("final validation residual after evaluation steps")
+    ax.set_title("validation final residual overview")
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_training_diagnostics(
+    *,
+    out: Path,
+    figure_dir: Path,
+    logs: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    best: float,
+    best_epoch: int | None,
+    completed_epoch: int,
+) -> dict[str, Any]:
+    total_training_elapsed = float(
+        sum(float(row.get("elapsed_seconds", 0.0)) for row in logs)
+    )
+    summary = {
+        "completed_epoch": int(completed_epoch),
+        "logged_training_epochs": len(logs),
+        "logged_validation_evaluations": len(history),
+        "total_training_elapsed_seconds": total_training_elapsed,
+        "best_checkpoint_epoch": None if best_epoch is None else int(best_epoch),
+        "best_validation": float(best),
+        "best_validation_metric_name": "final_residual_p95",
+        "training_time_semantics": "sum of per-epoch training loop elapsed_seconds; final evaluation time is not included",
+    }
+    save_json(summary, out / "training_summary.json")
+    plot_training_loss(logs, best_epoch, figure_dir / "training_loss.png")
+    plot_validation_overview(history, best_epoch, figure_dir / "validation_final_residual_overview.png")
+    return summary
+
+
 def train_one(
     args,
     spec,
@@ -289,6 +406,26 @@ def train_one(
     figure_dir = out / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
     if (out / "completed.json").exists() and args.skip_completed and not args.overwrite:
+        logs = load_training_log(out / "train_log.csv")
+        history = load_validation_history(out / "validation_metrics.json")
+        best_epoch, best = best_validation_from_history(history)
+        completed_epoch = max([int(row["epoch"]) for row in logs], default=args.epochs)
+        training_summary = save_training_diagnostics(
+            out=out,
+            figure_dir=figure_dir,
+            logs=logs,
+            history=history,
+            best=best,
+            best_epoch=best_epoch,
+            completed_epoch=completed_epoch,
+        )
+        completed = load_json(out / "completed.json")
+        completed.setdefault("best_checkpoint_epoch", best_epoch)
+        completed.setdefault(
+            "total_training_elapsed_seconds",
+            training_summary["total_training_elapsed_seconds"],
+        )
+        save_json(completed, out / "completed.json")
         print(f"skip completed {out}")
         return
 
@@ -298,13 +435,21 @@ def train_one(
     start_epoch, best = 1, math.inf
     history: list[dict[str, Any]] = []
     logs: list[dict[str, Any]] = []
+    best_epoch: int | None = None
     latest = out / "latest_checkpoint.pt"
+    if args.resume and not args.overwrite:
+        logs = load_training_log(out / "train_log.csv")
+        history = load_validation_history(out / "validation_metrics.json")
+        best_epoch, best = best_validation_from_history(history)
     if args.resume and latest.exists() and not args.overwrite:
         saved = torch.load(latest, map_location=device)
         model.load_state_dict(saved["model_state_dict"])
         optimizer.load_state_dict(saved["optimizer_state_dict"])
         start_epoch = int(saved["epoch"]) + 1
         best = float(saved.get("best_validation", math.inf))
+        saved_best_epoch = saved.get("best_validation_epoch")
+        if saved_best_epoch is not None:
+            best_epoch = int(saved_best_epoch)
 
     config = {
         "stage": args.stage,
@@ -381,7 +526,7 @@ def train_one(
         }
         logs.append(row)
         write_csv(logs, out / "train_log.csv")
-        checkpoint(latest, model, optimizer, epoch, spec, best, config)
+        checkpoint(latest, model, optimizer, epoch, spec, best, config, best_epoch)
 
         if epoch == 1 or epoch % args.validation_interval == 0 or epoch == args.epochs:
             validation_result = evaluate_model_iterations(
@@ -411,7 +556,8 @@ def train_one(
             best_path = out / "best_validation_model.pt"
             if (not best_path.exists()) or score < best:
                 best = score
-                checkpoint(best_path, model, optimizer, epoch, spec, best, config)
+                best_epoch = epoch
+                checkpoint(best_path, model, optimizer, epoch, spec, best, config, best_epoch)
                 torch.save(
                     validation_result["curve"], out / "best_validation_curve.pt"
                 )
@@ -419,11 +565,22 @@ def train_one(
                     validation_result["summary"],
                     out / "best_validation_summary.json",
                 )
+            checkpoint(latest, model, optimizer, epoch, spec, best, config, best_epoch)
             print(
                 f"{spec.experiment_name} epoch={epoch:04d} K={k} "
                 f"loss={row['loss_mean']:.3e} "
                 f"validation_final_p95={score:.3e} best={best:.3e}"
             )
+
+    training_summary = save_training_diagnostics(
+        out=out,
+        figure_dir=figure_dir,
+        logs=logs,
+        history=history,
+        best=best,
+        best_epoch=best_epoch,
+        completed_epoch=args.epochs,
+    )
 
     saved = torch.load(out / "best_validation_model.pt", map_location=device)
     model.load_state_dict(saved["model_state_dict"])
@@ -458,7 +615,15 @@ def train_one(
         {k: v for k, v in evaluation_curves.items() if k != "validation_xn"},
         out / "test_curves.pt",
     )
-    save_json({"completed": True, "best_validation": best}, out / "completed.json")
+    save_json(
+        {
+            "completed": True,
+            "best_validation": best,
+            "best_checkpoint_epoch": best_epoch,
+            "total_training_elapsed_seconds": training_summary["total_training_elapsed_seconds"],
+        },
+        out / "completed.json",
+    )
 
 
 def parse_args(argv=None):

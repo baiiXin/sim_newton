@@ -299,7 +299,7 @@ def evaluate_quasi_newton(
                 candidate_h = 0.5 * (
                     candidate_h + candidate_h.transpose(-1, -2)
                 )
-                finite_h = torch.isfinite(candidate_h).all(dim=(-2, -1))
+                finite_h = torch.isfinite(candidate_h).flatten(1).all(dim=1)
                 update = valid & finite_h
                 inverse_hessian[update] = candidate_h[update]
 
