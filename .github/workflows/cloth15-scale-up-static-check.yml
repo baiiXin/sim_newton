@@ -1,0 +1,35 @@
+name: Cloth15 scale-up checks
+
+on:
+  pull_request:
+    paths:
+      - "cloth_15x15_500step_project_scale_up/**"
+      - ".github/workflows/cloth15-scale-up-static-check.yml"
+  push:
+    branches:
+      - "feat/cloth15-scale-up-catalogue"
+    paths:
+      - "cloth_15x15_500step_project_scale_up/**"
+      - ".github/workflows/cloth15-scale-up-static-check.yml"
+
+jobs:
+  catalogue:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install runtime dependency
+        run: python -m pip install --disable-pip-version-check numpy
+      - name: Compile scale-up project
+        run: python -m compileall -q cloth_15x15_500step_project_scale_up
+      - name: Run catalogue tests
+        working-directory: cloth_15x15_500step_project_scale_up
+        run: python -m unittest -v test_scenario_catalogue.py
+      - name: Run full in-memory audit
+        working-directory: cloth_15x15_500step_project_scale_up
+        run: python cloth01_build_scenario_catalogue.py --audit-only
