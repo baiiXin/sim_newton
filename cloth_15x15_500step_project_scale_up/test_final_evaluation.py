@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from cloth05_train_scale_up_robust import robust_checkpoint_rank
 from cloth07_evaluate_best_checkpoint import (
     grouped_test_summaries,
     summarize_motion_rows,
@@ -62,6 +63,20 @@ class FinalEvaluationTests(unittest.TestCase):
         self.assertEqual(summary["failed_motion_count"], 1)
         self.assertEqual(summary["survival_rate"], 0.5)
         self.assertEqual(summary["residual_ratio_p95"], 0.2)
+
+    def test_nonfinite_checkpoint_tie_break_is_worst(self) -> None:
+        rank = robust_checkpoint_rank(
+            {
+                "failed_motion_count": 2,
+                "survival_frame_p05": 10,
+                "residual_ratio_p95": float("nan"),
+                "energy_increase_fraction": float("nan"),
+            }
+        )
+        self.assertEqual(rank[0], 2.0)
+        self.assertEqual(rank[1], -10.0)
+        self.assertEqual(rank[2], float("inf"))
+        self.assertEqual(rank[3], float("inf"))
 
     def test_grouped_test_summary_contains_all_and_each_group(self) -> None:
         rows = [
