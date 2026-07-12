@@ -13,7 +13,7 @@ on:
       - ".github/workflows/cloth15-scale-up-static-check.yml"
 
 jobs:
-  catalogue-and-physics:
+  catalogue-physics-and-pool:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,9 +29,16 @@ jobs:
           python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
       - name: Compile scale-up project
         run: python -m compileall -q cloth_15x15_500step_project_scale_up
-      - name: Run catalogue and physics tests
+      - name: Check trainer command line
         working-directory: cloth_15x15_500step_project_scale_up
-        run: python -m unittest -v test_scenario_catalogue.py test_batched_physics.py
+        run: python cloth05_train_scale_up.py --help > /dev/null
+      - name: Run catalogue physics and pool tests
+        working-directory: cloth_15x15_500step_project_scale_up
+        run: >-
+          python -m unittest -v
+          test_scenario_catalogue.py
+          test_batched_physics.py
+          test_training_pool.py
       - name: Run full in-memory audit
         working-directory: cloth_15x15_500step_project_scale_up
         run: python cloth01_build_scenario_catalogue.py --audit-only
