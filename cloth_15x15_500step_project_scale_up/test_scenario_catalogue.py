@@ -13,6 +13,11 @@ from scenario_catalogue import (
     dirichlet_targets,
     resolve_boundary_indices,
 )
+from validation_protocol import (
+    CHECKPOINT_VALIDATION,
+    VALIDATION_OUTPUTS,
+    VALIDATION_PROTOCOLS,
+)
 
 
 class ScenarioCatalogueTests(unittest.TestCase):
@@ -55,6 +60,17 @@ class ScenarioCatalogueTests(unittest.TestCase):
             "hard_combined_ood": 32,
         })
 
+    def test_all_scenarios_have_fixed_vertices(self) -> None:
+        for catalogue_name, scenarios in self.catalogues.items():
+            for scenario in scenarios:
+                boundary = BOUNDARY_BY_ID[scenario.boundary_id]
+                indices = resolve_boundary_indices(boundary, 15, 15)
+                self.assertGreater(
+                    len(indices),
+                    0,
+                    msg=f"{catalogue_name}/{scenario.scenario_id} has no fixed vertex",
+                )
+
     def test_resolution_independent_boundary_mapping(self) -> None:
         four = BOUNDARY_BY_ID["four_corners"]
         self.assertEqual(resolve_boundary_indices(four, 5, 5), (0, 4, 20, 24))
@@ -83,6 +99,16 @@ class ScenarioCatalogueTests(unittest.TestCase):
         )
         self.assertTrue(np.allclose(targets, state["positions"][list(indices)]))
         self.assertTrue(np.isfinite(velocities).all())
+
+    def test_dual_validation_contract(self) -> None:
+        self.assertEqual(len(VALIDATION_PROTOCOLS), 2)
+        selectors = [item for item in VALIDATION_PROTOCOLS if item.selects_checkpoint]
+        self.assertEqual(selectors, [CHECKPOINT_VALIDATION])
+        for protocol in VALIDATION_PROTOCOLS:
+            self.assertTrue(protocol.save_per_motion)
+            self.assertTrue(protocol.save_aggregate_curves)
+            self.assertTrue(protocol.render_plots)
+            self.assertIn(protocol.id, VALIDATION_OUTPUTS)
 
 
 if __name__ == "__main__":
