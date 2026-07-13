@@ -56,6 +56,7 @@ cloth_15x15_500step_project_scale_up/
 ├── cloth08_run_end_to_end.py
 ├── cloth09_rollout_single_motion_compare.py
 ├── cloth10_plot_initial_states.py
+├── cloth11_plot_training_progress.py
 │
 ├── test_scenario_catalogue.py
 ├── test_batched_physics.py
@@ -78,6 +79,7 @@ cloth_15x15_500step_project_scale_up/
 | `cloth08_run_end_to_end.py` | 显存测试、6 小时训练和最终评估的一键入口 |
 | `cloth09_rollout_single_motion_compare.py` | 单个 motion 的 K 步 rollout、渲染和 baseline 对比 |
 | `cloth10_plot_initial_states.py` | catalogue 中每个 motion 的初始形状、速度和固定点概览图 |
+| `cloth11_plot_training_progress.py` | 训练 loss、fast validation residual 和 checkpoint validation residual 曲线 |
 
 ---
 
@@ -830,7 +832,39 @@ python cloth05_train_scale_up_robust.py \
 
 默认不启用 bias；如需启用，添加 `--use-bias`。如果要按固定参数更新数停止，例如 3000000 次 optimizer updates，设置 `--max-updates 3000000`。
 
-### 13.4 最终评估
+### 13.4 训练曲线可视化
+
+训练过程中或训练结束后，可以把 loss 和两类 validation residual 画成随 optimizer update steps 变化的曲线：
+
+```bash
+python cloth11_plot_training_progress.py \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --activation relu \
+  --depth 1 \
+  --width 2048 \
+  --seed 42
+```
+
+默认不启用 bias；如需读取带 bias 的 run，添加 `--use-bias`。如果不想通过 catalogue/model/seed 推导目录，也可以直接指定：
+
+```bash
+--run-dir cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_relu_depth_01_width_2048_no_bias/seed_42
+```
+
+默认输出：
+
+```text
+<run_dir>/figures/training_progress/
+├── loss_vs_update.png
+├── fast_monitor_residual_vs_update.png
+├── checkpoint_validation_residual_vs_update.png
+└── training_progress_manifest.json
+```
+
+三张图都会用红色虚线标出 `completed.json` 中的 `best_validation_update`。若 `completed.json` 不存在，脚本会尝试从 `best_validation_model.pt` 读取 checkpoint step。validation residual 默认使用 `residual_ratio_p95` 且采用 log y 轴；如需线性 y 轴，添加 `--validation-linear-y`。
+
+### 13.5 最终评估
 
 ```bash
 python cloth07_evaluate_best_checkpoint.py \
@@ -848,7 +882,7 @@ python cloth07_evaluate_best_checkpoint.py \
 
 默认评估 `best_validation_model.pt`。如需评估某个 periodic checkpoint，可添加 `--checkpoint-update 20000`；如需启用 bias，添加 `--use-bias`。
 
-### 13.5 单 motion rollout 渲染与 baseline 对比
+### 13.6 单 motion rollout 渲染与 baseline 对比
 
 `cloth07_evaluate_best_checkpoint.py` 是 validation/test 全量批评估，不渲染单条轨迹，也不做 baseline 对比。若要先选一条 motion 检查固定 `K=50` 的 rollout，使用：
 
