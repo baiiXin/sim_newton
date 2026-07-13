@@ -142,6 +142,7 @@ def plot_series(
     output_path: Path,
     best_update: int | None,
     log_y: bool,
+    y_limits: tuple[float, float] | None,
     dpi: int,
 ) -> None:
     import matplotlib
@@ -163,6 +164,8 @@ def plot_series(
         ax.legend(fontsize=8)
     if log_y and all(value > 0.0 for value in ys):
         ax.set_yscale("log")
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
     ax.set_xlabel("optimizer update steps")
     ax.set_ylabel(y_label)
     ax.set_title(title)
@@ -170,6 +173,15 @@ def plot_series(
     fig.tight_layout()
     fig.savefig(output_path, dpi=dpi)
     plt.close(fig)
+
+
+def centered_loss_limits(values: Sequence[float]) -> tuple[float, float]:
+    radius = 1.2 * abs(min(values))
+    if radius <= 0.0 or not math.isfinite(radius):
+        radius = 1.2 * max(abs(value) for value in values)
+    if radius <= 0.0 or not math.isfinite(radius):
+        radius = 1.0
+    return -radius, radius
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> None:
@@ -206,6 +218,7 @@ def main() -> None:
         output_path=loss_path,
         best_update=best_update,
         log_y=False,
+        y_limits=centered_loss_limits(loss_ys),
         dpi=args.dpi,
     )
     outputs["loss"] = str(loss_path)
@@ -238,6 +251,7 @@ def main() -> None:
             output_path=output_path,
             best_update=best_update,
             log_y=not args.validation_linear_y,
+            y_limits=None,
             dpi=args.dpi,
         )
         outputs[name] = str(output_path)

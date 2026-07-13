@@ -862,7 +862,7 @@ python cloth11_plot_training_progress.py \
 └── training_progress_manifest.json
 ```
 
-三张图都会用红色虚线标出 `completed.json` 中的 `best_validation_update`。若 `completed.json` 不存在，脚本会尝试从 `best_validation_model.pt` 读取 checkpoint step。validation residual 默认使用 `residual_ratio_p95` 且采用 log y 轴；如需线性 y 轴，添加 `--validation-linear-y`。
+三张图都会用红色虚线标出 `completed.json` 中的 `best_validation_update`。若 `completed.json` 不存在，脚本会尝试从 `best_validation_model.pt` 读取 checkpoint step。`loss_vs_update.png` 以 0 为纵坐标中心，半径取 `1.2 * abs(min(loss))`，超过该范围的点允许被裁掉。validation residual 默认使用 `residual_ratio_p95` 且采用 log y 轴；如需线性 y 轴，添加 `--validation-linear-y`。
 
 ### 13.5 最终评估
 
@@ -884,10 +884,41 @@ python cloth07_evaluate_best_checkpoint.py \
 
 ### 13.6 单 motion rollout 渲染与 baseline 对比
 
-`cloth07_evaluate_best_checkpoint.py` 是 validation/test 全量批评估，不渲染单条轨迹，也不做 baseline 对比。若要先选一条 motion 检查固定 `K=50` 的 rollout，使用：
+`cloth07_evaluate_best_checkpoint.py` 是 validation/test 全量批评估，不渲染单条轨迹，也不做 baseline 对比。单 motion 脚本现在分为两个模式：
+
+- `--mode baseline`：只跑 baseline，不需要 checkpoint，结果缓存在 `cloth_15x15_scale_up_pipeline/single_motion_rollout_baseline/`；
+- `--mode mlp`：跑指定 checkpoint 的 MLP，并读取同一 motion 已缓存的 baseline；如果 baseline 不存在，会先自动生成。
+
+先跑 baseline：
 
 ```bash
 python cloth09_rollout_single_motion_compare.py \
+  --mode baseline \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --device cuda:0 \
+  --split test \
+  --motion-index 0 \
+  --rollout-frames 500 \
+  --inner-steps 50 \
+  --fixed-gd-step-size 5e-5 \
+  --line-search-gd-step-size 5e-5 \
+  --render-format mp4 \
+  --fps 30 \
+  --overwrite
+```
+
+baseline 输出目录默认是：
+
+```text
+cloth_15x15_scale_up_pipeline/single_motion_rollout_baseline/test_256_motion_0000_f500_k050/
+```
+
+然后跑 MLP 并和 baseline 对比：
+
+```bash
+python cloth09_rollout_single_motion_compare.py \
+  --mode mlp \
   --root cloth_15x15_scale_up_pipeline \
   --catalogue c2 \
   --activation relu \
@@ -906,7 +937,7 @@ python cloth09_rollout_single_motion_compare.py \
   --overwrite
 ```
 
-默认 checkpoint 为当前 run directory 下的：
+`--mode mlp` 默认 checkpoint 为当前 run directory 下的：
 
 ```text
 best_validation_model.pt
@@ -916,6 +947,7 @@ best_validation_model.pt
 
 ```bash
 python cloth09_rollout_single_motion_compare.py \
+  --mode mlp \
   --root cloth_15x15_scale_up_pipeline \
   --catalogue c2 \
   --activation relu \
@@ -938,6 +970,7 @@ python cloth09_rollout_single_motion_compare.py \
 
 ```bash
 python cloth09_rollout_single_motion_compare.py \
+  --mode mlp \
   --root cloth_15x15_scale_up_pipeline \
   --catalogue c2 \
   --activation relu \
@@ -978,23 +1011,24 @@ cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_relu_depth_01_widt
 单条 rollout 会保存：
 
 ```text
-rollout_compare.mp4
+rollout_<solver>.mp4
 diagnostics.png
+line_search_times_vs_frame.png
 metrics.json
 per_frame.csv
 rollout_compare.pt
 ```
 
-`rollout_compare.mp4` 按网格排布 solver；默认四个 solver 时为上面两个、下面两个。`diagnostics.png` 包含 frame-level residual、frame-level residual ratio，以及 final residual 最大的物理帧上的 residual-vs-iteration 曲线；前两张图会用虚线标出该 worst frame。
+视频按 solver 分开渲染，不再合成网格视频。baseline 模式会输出 `rollout_gd_fixed_lr_5e-5.mp4`、`rollout_line_search_gd.mp4`、`rollout_mass_preconditioned_line_search_gd.mp4` 和 `rollout_newton.mp4`。MLP 模式会读取 baseline 数据参与绘图和 CSV/PT 保存，但只渲染自己的 `rollout_mlp.mp4`，不重复渲染 baseline 视频。`diagnostics.png` 包含 frame-level residual、frame-level residual ratio，以及 final residual 最大的物理帧上的 residual-vs-iteration 曲线；前两张图会用虚线标出该 worst frame。`line_search_times_vs_frame.png` 画每个物理帧内 line search 候选步长评估次数。
 
-当前默认会同时输出四个求解器：
+baseline cache 默认包含四个求解器：
 
-- `mlp`：训练得到的 learned optimizer；
-- `newton`：自由自由度上的原始 Newton，直接解 `H Δ = -r`，不加阻尼，不做 line search；
 - `gd_fixed_lr_5e-5`：原始 residual/gradient 的固定步长 GD，默认 `lr=5e-5`，不带线搜索。
-- `line_search_gd`：原始 residual/gradient 的 GD，默认初始步长 `5e-5`，带 Armijo 回退线搜索。
+- `line_search_gd`：原始 residual/gradient 的 GD，默认初始步长 `5e-5`，先做 Armijo 向上试探，再做回退线搜索，默认最多向上放大 8 次、回退 30 次。
+- `mass_preconditioned_line_search_gd`：质量预条件 residual 的 GD，带能量不增回退线搜索；
+- `newton`：自由自由度上的原始 Newton，直接解 `H Δ = -r`，不加阻尼，不做 line search。
 
-旧的 `mass_preconditioned_gd` 实现仍保留在脚本中用于需要时手工改用，但默认不进入 `rollout_compare.mp4`、`diagnostics.png`、`per_frame.csv` 和 `metrics.json`。
+MLP 模式会在这四条 baseline 前再加一条 `mlp`。如果 baseline cache 已存在，默认直接读取；如需强制重跑 baseline，添加 `--refresh-baseline`。
 
 每个物理帧内默认开启 inner iteration 早停，因此 `--inner-steps 50` 表示每帧最多 50 次迭代，而不是强制每帧都执行 50 次。默认收敛判据为：
 

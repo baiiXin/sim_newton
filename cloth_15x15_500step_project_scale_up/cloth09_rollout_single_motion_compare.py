@@ -48,6 +48,7 @@ from scenario_templates import (
 
 
 DEFAULT_ROOT = Path("cloth_15x15_scale_up_pipeline")
+BASELINE_SUBDIR = "single_motion_rollout_baseline"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--mode", choices=("mlp", "baseline"), default="mlp")
     parser.add_argument("--catalogue", choices=("c1", "c2", "c3"), default="c2")
     parser.add_argument("--activation", default=ModelSpec().activation)
     parser.add_argument("--depth", type=int, default=ModelSpec().depth)
@@ -103,7 +105,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-line-search-reductions", type=int, default=12)
     parser.add_argument("--fixed-gd-step-size", type=float, default=5e-5)
     parser.add_argument("--line-search-gd-step-size", type=float, default=5e-5)
-    parser.add_argument("--line-search-gd-reductions", type=int, default=12)
+    parser.add_argument("--line-search-gd-reductions", type=int, default=30)
+    parser.add_argument("--line-search-gd-growths", type=int, default=8)
+    parser.add_argument("--refresh-baseline", action="store_true")
     parser.add_argument("--disable-inner-early-stop", action="store_true")
     parser.add_argument("--convergence-residual-ratio-tol", type=float, default=1e-10)
     parser.add_argument("--convergence-absolute-residual-tol", type=float, default=1e-10)
@@ -219,6 +223,34 @@ def default_output_dir(args: argparse.Namespace, run_dir: Path) -> Path:
         f"k{args.inner_steps:03d}_{bias}"
     )
     return run_dir / "single_motion_rollouts" / name
+
+
+def checkpoint_run_dir(checkpoint: Path, fallback: Path) -> Path:
+    resolved = checkpoint
+    if resolved.name.startswith("checkpoint_update_") and resolved.parent.name == "periodic":
+        return resolved.parent.parent
+    if resolved.name in {
+        "best_validation_model.pt",
+        "latest_checkpoint.pt",
+    }:
+        return resolved.parent
+    return fallback
+
+
+def baseline_output_dir(args: argparse.Namespace) -> Path:
+    name = (
+        f"{split_key(args.split, args.catalogue)}_"
+        f"motion_{args.motion_index:04d}_"
+        f"f{args.rollout_frames:03d}_"
+        f"k{args.inner_steps:03d}"
+    )
+    return args.root / BASELINE_SUBDIR / name
+
+
+def baseline_dtype(args: argparse.Namespace) -> torch.dtype:
+    if args.dtype == "float32":
+        return torch.float32
+    return torch.float64
 
 
 def _finite_float(value: torch.Tensor, default: float = float("nan")) -> float:
@@ -348,7 +380,7 @@ def baseline_step(
     targets: torch.Tensor,
     step_size: float,
     max_reductions: int,
-) -> tuple[torch.Tensor, bool, float]:
+) -> tuple[torch.Tensor, bool, float, int]:
     energy = variational_energy(y, q, params, targets)
     residual = stationarity_residual(y, q, params, targets)
     residual_points = residual.reshape(params.batch_size, params.num_vertices, 3)
@@ -362,7 +394,9 @@ def baseline_step(
     )
     y_flat = y.reshape(params.batch_size, -1)
     scale = float(step_size)
+    trials = 0
     for _ in range(max(0, max_reductions) + 1):
+        trials += 1
         candidate = project_positions(y_flat + scale * direction, params, targets)
         candidate_energy = variational_energy(candidate, q, params, targets)
         accepted = (
@@ -371,9 +405,9 @@ def baseline_step(
             & (candidate_energy <= energy)
         )
         if bool(accepted[0].item()):
-            return candidate.reshape_as(y), True, scale
+            return candidate.reshape_as(y), True, scale, trials
         scale *= 0.5
-    return y, False, 0.0
+    return y, False, 0.0, trials
 
 
 @torch.no_grad()
@@ -401,15 +435,41 @@ def line_search_gradient_descent_step(
     targets: torch.Tensor,
     step_size: float,
     max_reductions: int,
+    max_growths: int,
     c1: float = 1e-4,
-) -> tuple[torch.Tensor, bool, float]:
+) -> tuple[torch.Tensor, bool, float, int]:
     energy = variational_energy(y, q, params, targets)
     residual = stationarity_residual(y, q, params, targets).reshape(params.batch_size, -1)
     direction = -residual * free_update_gate(params, flattened=True).to(params.dtype)
     directional = torch.sum(residual * direction, dim=-1)
     y_flat = y.reshape(params.batch_size, -1)
     scale = float(step_size)
+    best_candidate: torch.Tensor | None = None
+    best_scale = 0.0
+    trials = 0
+
+    for _ in range(max(0, max_growths) + 1):
+        trials += 1
+        candidate = project_positions(y_flat + scale * direction, params, targets)
+        candidate_energy = variational_energy(candidate, q, params, targets)
+        armijo_rhs = energy + c1 * scale * directional
+        accepted = (
+            torch.isfinite(candidate).flatten(start_dim=1).all(dim=1)
+            & torch.isfinite(candidate_energy)
+            & (candidate_energy <= armijo_rhs)
+        )
+        if not bool(accepted[0].item()):
+            break
+        best_candidate = candidate
+        best_scale = scale
+        scale *= 2.0
+
+    if best_candidate is not None:
+        return best_candidate.reshape_as(y), True, best_scale, trials
+
+    scale = float(step_size)
     for _ in range(max(0, max_reductions) + 1):
+        trials += 1
         candidate = project_positions(y_flat + scale * direction, params, targets)
         candidate_energy = variational_energy(candidate, q, params, targets)
         armijo_rhs = energy + c1 * scale * directional
@@ -419,9 +479,9 @@ def line_search_gradient_descent_step(
             & (candidate_energy <= armijo_rhs)
         )
         if bool(accepted[0].item()):
-            return candidate.reshape_as(y), True, scale
+            return candidate.reshape_as(y), True, scale, trials
         scale *= 0.5
-    return y, False, 0.0
+    return y, False, 0.0, trials
 
 
 def newton_step(
@@ -598,6 +658,7 @@ def run_baseline_rollout(
     thresholds: FailureThresholds,
     step_size: float,
     max_reductions: int,
+    convergence: InnerConvergence,
 ) -> dict[str, Any]:
     params = build_batched_parameters((scenario,), device=device, dtype=dtype)
     p = params.initial_positions.clone()
@@ -622,9 +683,14 @@ def run_baseline_rollout(
         curve = [frame_diagnostics(y=y, q=q, params=params, targets=targets, thresholds=thresholds)["residual"]]
         energy_before = variational_energy(y, q, params, targets)
         accepted_scales: list[float] = []
+        line_search_trials = 0
+        frame_line_search_failures = 0
+        convergence_hit = False
+        convergence_hit_reason = ""
 
         for _ in range(inner_steps):
-            y, accepted, accepted_scale = baseline_step(
+            y_before = y.clone()
+            y, accepted, accepted_scale, trials = baseline_step(
                 y=y,
                 q=q,
                 params=params,
@@ -632,18 +698,29 @@ def run_baseline_rollout(
                 step_size=step_size,
                 max_reductions=max_reductions,
             )
+            line_search_trials += int(trials)
             if not accepted:
                 line_search_failures += 1
+                frame_line_search_failures += 1
             accepted_scales.append(float(accepted_scale))
-            curve.append(
-                frame_diagnostics(
-                    y=y,
-                    q=q,
-                    params=params,
-                    targets=targets,
-                    thresholds=thresholds,
-                )["residual"]
+            current_residual = frame_diagnostics(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                thresholds=thresholds,
+            )["residual"]
+            curve.append(current_residual)
+            reason = convergence_reason(
+                initial_residual=curve[0],
+                current_residual=current_residual,
+                normalized_step=normalized_free_step(y_before, y, params),
+                config=convergence,
             )
+            if reason is not None:
+                convergence_hit = True
+                convergence_hit_reason = reason
+                break
 
         diagnostics = frame_diagnostics(
             y=y,
@@ -668,10 +745,15 @@ def run_baseline_rollout(
                     if nonzero_scales
                     else 0.0
                 ),
+                "line_search_trials": line_search_trials,
+                "line_search_failures_frame": frame_line_search_failures,
+                "inner_steps_used": len(curve) - 1,
+                "inner_converged": convergence_hit,
+                "convergence_reason": convergence_hit_reason,
             }
         )
         frame_rows.append(diagnostics)
-        residual_curve.append(curve)
+        residual_curve.append(padded_curve(curve, inner_steps + 1))
         if diagnostics["failed"]:
             failure_frame = frame
             positions.append(p[0].detach().cpu())
@@ -680,12 +762,13 @@ def run_baseline_rollout(
         positions.append(p[0].detach().cpu())
 
     return {
-        "solver": "mass_preconditioned_gd",
+        "solver": "mass_preconditioned_line_search_gd",
         "positions": torch.stack(positions, dim=0),
         "residual_by_frame_and_iteration": torch.tensor(residual_curve, dtype=torch.float64),
         "frames": frame_rows,
         "failure_frame": failure_frame,
         "line_search_failures": line_search_failures,
+        "initial_step_size": float(step_size),
     }
 
 
@@ -814,6 +897,7 @@ def run_line_search_gd_rollout(
     thresholds: FailureThresholds,
     step_size: float,
     max_reductions: int,
+    max_growths: int,
     convergence: InnerConvergence,
 ) -> dict[str, Any]:
     params = build_batched_parameters((scenario,), device=device, dtype=dtype)
@@ -847,21 +931,26 @@ def run_line_search_gd_rollout(
         ]
         energy_before = variational_energy(y, q, params, targets)
         accepted_scales: list[float] = []
+        line_search_trials = 0
+        frame_line_search_failures = 0
         convergence_hit = False
         convergence_hit_reason = ""
 
         for _ in range(inner_steps):
             y_before = y.clone()
-            y, accepted, accepted_scale = line_search_gradient_descent_step(
+            y, accepted, accepted_scale, trials = line_search_gradient_descent_step(
                 y=y,
                 q=q,
                 params=params,
                 targets=targets,
                 step_size=step_size,
                 max_reductions=max_reductions,
+                max_growths=max_growths,
             )
+            line_search_trials += int(trials)
             if not accepted:
                 line_search_failures += 1
+                frame_line_search_failures += 1
             accepted_scales.append(float(accepted_scale))
             current_residual = frame_diagnostics(
                 y=y,
@@ -908,6 +997,8 @@ def run_line_search_gd_rollout(
                 "inner_steps_used": len(curve) - 1,
                 "inner_converged": convergence_hit,
                 "convergence_reason": convergence_hit_reason,
+                "line_search_trials": line_search_trials,
+                "line_search_failures_frame": frame_line_search_failures,
             }
         )
         frame_rows.append(diagnostics)
@@ -927,6 +1018,7 @@ def run_line_search_gd_rollout(
         "failure_frame": failure_frame,
         "line_search_failures": line_search_failures,
         "initial_step_size": float(step_size),
+        "line_search_growths": int(max_growths),
     }
 
 
@@ -1183,6 +1275,102 @@ def plot_diagnostics(output: Path, results: Sequence[dict[str, Any]]) -> None:
     plt.close(fig)
 
 
+def plot_line_search_times(output: Path, results: Sequence[dict[str, Any]]) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.0, 4.5))
+    colors = ("tab:orange", "tab:red", "tab:purple", "tab:brown")
+    plotted = False
+    for index, result in enumerate(results):
+        frames: list[int] = []
+        trials: list[float] = []
+        for row in result["frames"]:
+            value = row.get("line_search_trials")
+            if value is None:
+                continue
+            numeric = float(value)
+            if math.isfinite(numeric):
+                frames.append(int(row["frame"]))
+                trials.append(numeric)
+        if not frames:
+            continue
+        ax.plot(
+            frames,
+            trials,
+            label=result["solver"],
+            color=colors[index % len(colors)],
+        )
+        plotted = True
+    ax.set_xlabel("physical frame")
+    ax.set_ylabel("line search candidate evaluations")
+    ax.set_title("Line search times vs frame")
+    ax.grid(True, alpha=0.25)
+    if plotted:
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "no line-search solver", ha="center", va="center")
+    fig.tight_layout()
+    fig.savefig(output, dpi=180)
+    plt.close(fig)
+
+
+def result_payload(results: Sequence[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "manifest": manifest,
+        "results": list(results),
+    }
+    for result in results:
+        key = str(result["solver"]).replace("-", "_")
+        payload[key] = result
+    return payload
+
+
+def safe_solver_filename(name: str) -> str:
+    return "".join(
+        character if character.isalnum() or character in {"_", "-", "."} else "_"
+        for character in name
+    )
+
+
+def save_rollout_outputs(
+    *,
+    output_dir: Path,
+    manifest: dict[str, Any],
+    results: Sequence[dict[str, Any]],
+    render_results: Sequence[dict[str, Any]] | None,
+    scenario: ScenarioSpec,
+    args: argparse.Namespace,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(result_payload(results, manifest), output_dir / "rollout_compare.pt")
+    write_json(output_dir / "metrics.json", manifest)
+    write_frame_csv(output_dir / "per_frame.csv", results)
+    plot_diagnostics(output_dir / "diagnostics.png", results)
+    plot_line_search_times(output_dir / "line_search_times_vs_frame.png", results)
+
+    if args.render_format == "none":
+        return []
+    render_outputs: list[Path] = []
+    selected_render_results = results if render_results is None else render_results
+    for result in selected_render_results:
+        solver = safe_solver_filename(str(result["solver"]))
+        render_output = output_dir / f"rollout_{solver}.{args.render_format}"
+        render_comparison(
+            output=render_output,
+            results=[result],
+            scenario=scenario,
+            fps=args.fps,
+            stride=args.render_stride,
+            format_name=args.render_format,
+        )
+        render_outputs.append(render_output)
+    return render_outputs
+
+
 def axis_box(*arrays) -> tuple[Any, float]:
     import numpy as np
 
@@ -1298,6 +1486,183 @@ def render_comparison(
     return output
 
 
+def run_baseline_suite(
+    *,
+    scenario: ScenarioSpec,
+    args: argparse.Namespace,
+    device: torch.device,
+    dtype: torch.dtype,
+    thresholds: FailureThresholds,
+    convergence: InnerConvergence,
+) -> list[dict[str, Any]]:
+    fixed_gd = run_fixed_gd_rollout(
+        scenario=scenario,
+        rollout_frames=args.rollout_frames,
+        inner_steps=args.inner_steps,
+        device=device,
+        dtype=dtype,
+        thresholds=thresholds,
+        step_size=args.fixed_gd_step_size,
+        convergence=convergence,
+    )
+    line_search_gd = run_line_search_gd_rollout(
+        scenario=scenario,
+        rollout_frames=args.rollout_frames,
+        inner_steps=args.inner_steps,
+        device=device,
+        dtype=dtype,
+        thresholds=thresholds,
+        step_size=args.line_search_gd_step_size,
+        max_reductions=args.line_search_gd_reductions,
+        max_growths=args.line_search_gd_growths,
+        convergence=convergence,
+    )
+    mass_preconditioned = run_baseline_rollout(
+        scenario=scenario,
+        rollout_frames=args.rollout_frames,
+        inner_steps=args.inner_steps,
+        device=device,
+        dtype=dtype,
+        thresholds=thresholds,
+        step_size=args.baseline_step_size,
+        max_reductions=args.baseline_line_search_reductions,
+        convergence=convergence,
+    )
+    newton = run_newton_rollout(
+        scenario=scenario,
+        rollout_frames=args.rollout_frames,
+        inner_steps=args.inner_steps,
+        device=device,
+        dtype=dtype,
+        thresholds=thresholds,
+        convergence=convergence,
+    )
+    return [fixed_gd, line_search_gd, mass_preconditioned, newton]
+
+
+def baseline_manifest(
+    *,
+    args: argparse.Namespace,
+    scenario: ScenarioSpec,
+    selected_row: dict[str, Any],
+    dtype: torch.dtype,
+    device: torch.device,
+    convergence: InnerConvergence,
+    results: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "mode": "baseline",
+        "output_kind": "baseline_cache",
+        "split": args.split,
+        "catalogue_key": split_key(args.split, args.catalogue),
+        "motion_index": int(args.motion_index),
+        "selected_motion": selected_row,
+        "scenario": asdict(scenario),
+        "scenario_labels": scenario_labels(scenario),
+        "dtype": str(dtype).replace("torch.", ""),
+        "device": str(device),
+        "rollout_frames": int(args.rollout_frames),
+        "inner_steps": int(args.inner_steps),
+        "inner_early_stop": asdict(convergence),
+        "baselines": [
+            {
+                "solver": "gd_fixed_lr_5e-5",
+                "step_size": float(args.fixed_gd_step_size),
+                "line_search": None,
+            },
+            {
+                "solver": "line_search_gd",
+                "step_size": float(args.line_search_gd_step_size),
+                "line_search": "Armijo growth and backtracking",
+                "line_search_growths": int(args.line_search_gd_growths),
+                "line_search_reductions": int(args.line_search_gd_reductions),
+            },
+            {
+                "solver": "mass_preconditioned_line_search_gd",
+                "step_size": float(args.baseline_step_size),
+                "line_search": "energy non-increase backtracking",
+                "line_search_reductions": int(args.baseline_line_search_reductions),
+            },
+            {
+                "solver": "newton",
+                "line_search": None,
+                "damping": None,
+                "state": "free degrees of freedom only",
+            },
+        ],
+        "summaries": [summarize_rollout(result, args.rollout_frames) for result in results],
+    }
+
+
+def run_and_save_baseline_suite(
+    *,
+    args: argparse.Namespace,
+    scenario: ScenarioSpec,
+    selected_row: dict[str, Any],
+    thresholds: FailureThresholds,
+    convergence: InnerConvergence,
+    strict_existing: bool,
+) -> tuple[list[dict[str, Any]], Path, list[Path]]:
+    output_dir = args.output_dir if args.output_dir is not None and args.mode == "baseline" else baseline_output_dir(args)
+    if output_dir.exists() and strict_existing and not args.overwrite:
+        raise FileExistsError(f"{output_dir} exists; pass --overwrite to replace files")
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA device requested but CUDA is unavailable")
+    dtype = baseline_dtype(args)
+    results = run_baseline_suite(
+        scenario=scenario,
+        args=args,
+        device=device,
+        dtype=dtype,
+        thresholds=thresholds,
+        convergence=convergence,
+    )
+    manifest = baseline_manifest(
+        args=args,
+        scenario=scenario,
+        selected_row=selected_row,
+        dtype=dtype,
+        device=device,
+        convergence=convergence,
+        results=results,
+    )
+    render_outputs = save_rollout_outputs(
+        output_dir=output_dir,
+        manifest=manifest,
+        results=results,
+        render_results=None,
+        scenario=scenario,
+        args=args,
+    )
+    return results, output_dir, render_outputs
+
+
+def load_or_create_baselines(
+    *,
+    args: argparse.Namespace,
+    scenario: ScenarioSpec,
+    selected_row: dict[str, Any],
+    thresholds: FailureThresholds,
+    convergence: InnerConvergence,
+) -> tuple[list[dict[str, Any]], Path]:
+    output_dir = baseline_output_dir(args)
+    payload_path = output_dir / "rollout_compare.pt"
+    if payload_path.exists() and not args.refresh_baseline:
+        payload = torch.load(payload_path, map_location="cpu", weights_only=False)
+        results = list(payload["results"])
+        return results, output_dir
+    results, output_dir, _ = run_and_save_baseline_suite(
+        args=args,
+        scenario=scenario,
+        selected_row=selected_row,
+        thresholds=thresholds,
+        convergence=convergence,
+        strict_existing=False,
+    )
+    return results, output_dir
+
+
 def main() -> None:
     args = parse_args()
     if args.list_motions:
@@ -1311,33 +1676,14 @@ def main() -> None:
         raise ValueError("--fixed-gd-step-size must be positive")
     if args.line_search_gd_step_size <= 0:
         raise ValueError("--line-search-gd-step-size must be positive")
+    if args.line_search_gd_reductions < 0:
+        raise ValueError("--line-search-gd-reductions must be non-negative")
+    if args.line_search_gd_growths < 0:
+        raise ValueError("--line-search-gd-growths must be non-negative")
     if args.render_stride <= 0:
         raise ValueError("--render-stride must be positive")
     convergence = convergence_from_args(args)
     validate_convergence(convergence)
-
-    run_dir = run_directory(args)
-    selected_checkpoint = checkpoint_path(args, run_dir)
-    if not selected_checkpoint.exists():
-        raise FileNotFoundError(selected_checkpoint)
-    output_dir = args.output_dir or default_output_dir(args, run_dir)
-    if output_dir.exists() and not args.overwrite:
-        raise FileExistsError(f"{output_dir} exists; pass --overwrite to replace files")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    checkpoint = torch.load(selected_checkpoint, map_location="cpu", weights_only=False)
-    device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA device requested but CUDA is unavailable")
-    dtype = resolve_dtype(args.dtype, checkpoint)
-    spec = ModelSpec(**checkpoint["model_spec"])
-    model = LearnedOptimizerMLP(
-        full_state_dim=15 * 15 * 3,
-        model_spec=spec,
-        dtype=dtype,
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
 
     scenario = selected_scenario(args)
     selected_row = scenario_row(args.motion_index, scenario)
@@ -1358,6 +1704,53 @@ def main() -> None:
         max_constraint_error=args.max_constraint_error,
     )
 
+    if args.mode == "baseline":
+        results, output_dir, render_outputs = run_and_save_baseline_suite(
+            args=args,
+            scenario=scenario,
+            selected_row=selected_row,
+            thresholds=thresholds,
+            convergence=convergence,
+            strict_existing=True,
+        )
+        summaries = [summarize_rollout(result, args.rollout_frames) for result in results]
+        print(f"baseline rollout 完成：{output_dir}")
+        for render_output in render_outputs:
+            print(f"渲染输出：{render_output}")
+        print(
+            "summary: "
+            + " ".join(
+                f"{summary['solver']}_ratio_mean={summary['residual_ratio_mean']}"
+                for summary in summaries
+            )
+        )
+        return
+
+    run_dir = run_directory(args)
+    selected_checkpoint = checkpoint_path(args, run_dir)
+    if not selected_checkpoint.exists():
+        raise FileNotFoundError(selected_checkpoint)
+
+    checkpoint = torch.load(selected_checkpoint, map_location="cpu", weights_only=False)
+    actual_run_dir = checkpoint_run_dir(selected_checkpoint, run_dir)
+    output_dir = args.output_dir or default_output_dir(args, actual_run_dir)
+    if output_dir.exists() and not args.overwrite:
+        raise FileExistsError(f"{output_dir} exists; pass --overwrite to replace files")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA device requested but CUDA is unavailable")
+    dtype = resolve_dtype(args.dtype, checkpoint)
+    spec = ModelSpec(**checkpoint["model_spec"])
+    model = LearnedOptimizerMLP(
+        full_state_dim=15 * 15 * 3,
+        model_spec=spec,
+        dtype=dtype,
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
     learned = run_model_rollout(
         model=model,
         scenario=scenario,
@@ -1368,53 +1761,26 @@ def main() -> None:
         thresholds=thresholds,
         convergence=convergence,
     )
-    newton = run_newton_rollout(
+    baseline_results, baseline_dir = load_or_create_baselines(
+        args=args,
         scenario=scenario,
-        rollout_frames=args.rollout_frames,
-        inner_steps=args.inner_steps,
-        device=device,
-        dtype=dtype,
         thresholds=thresholds,
         convergence=convergence,
-    )
-    fixed_gd = run_fixed_gd_rollout(
-        scenario=scenario,
-        rollout_frames=args.rollout_frames,
-        inner_steps=args.inner_steps,
-        device=device,
-        dtype=dtype,
-        thresholds=thresholds,
-        step_size=args.fixed_gd_step_size,
-        convergence=convergence,
-    )
-    line_search_gd = run_line_search_gd_rollout(
-        scenario=scenario,
-        rollout_frames=args.rollout_frames,
-        inner_steps=args.inner_steps,
-        device=device,
-        dtype=dtype,
-        thresholds=thresholds,
-        step_size=args.line_search_gd_step_size,
-        max_reductions=args.line_search_gd_reductions,
-        convergence=convergence,
+        selected_row=selected_row,
     )
 
     learned_summary = summarize_rollout(learned, args.rollout_frames)
-    newton_summary = summarize_rollout(newton, args.rollout_frames)
-    fixed_gd_summary = summarize_rollout(fixed_gd, args.rollout_frames)
-    line_search_gd_summary = summarize_rollout(line_search_gd, args.rollout_frames)
-    results = [learned, newton, fixed_gd, line_search_gd]
-    summaries = [
-        learned_summary,
-        newton_summary,
-        fixed_gd_summary,
-        line_search_gd_summary,
-    ]
+    results = [learned, *baseline_results]
+    summaries = [learned_summary, *[
+        summarize_rollout(result, args.rollout_frames) for result in baseline_results
+    ]]
     worst_frame = worst_residual_frame(results)
     manifest = {
+        "mode": "mlp",
         "checkpoint": str(selected_checkpoint),
         "checkpoint_update": int(checkpoint.get("update_count", 0)),
-        "run_directory": str(run_dir),
+        "run_directory": str(actual_run_dir),
+        "baseline_directory": str(baseline_dir),
         "model_spec": asdict(spec),
         "requested_model_spec": asdict(
             ModelSpec(
@@ -1437,65 +1803,51 @@ def main() -> None:
         "worst_final_residual_frame": worst_frame,
         "baselines": [
             {
-                "solver": "newton",
-                "line_search": None,
-                "damping": None,
-                "state": "free degrees of freedom only",
-            },
-            {
-                "solver": fixed_gd["solver"],
+                "solver": "gd_fixed_lr_5e-5",
                 "step_size": float(args.fixed_gd_step_size),
                 "line_search": None,
             },
             {
                 "solver": "line_search_gd",
                 "step_size": float(args.line_search_gd_step_size),
-                "line_search": "Armijo backtracking",
+                "line_search": "Armijo growth and backtracking",
+                "line_search_growths": int(args.line_search_gd_growths),
                 "line_search_reductions": int(args.line_search_gd_reductions),
+            },
+            {
+                "solver": "mass_preconditioned_line_search_gd",
+                "step_size": float(args.baseline_step_size),
+                "line_search": "energy non-increase backtracking",
+                "line_search_reductions": int(args.baseline_line_search_reductions),
+            },
+            {
+                "solver": "newton",
+                "line_search": None,
+                "damping": None,
+                "state": "free degrees of freedom only",
             },
         ],
         "summaries": summaries,
     }
-    torch.save(
-        {
-            "manifest": manifest,
-            "mlp": learned,
-            "newton": newton,
-            "fixed_gd": fixed_gd,
-            "line_search_gd": line_search_gd,
-            "results": results,
-        },
-        output_dir / "rollout_compare.pt",
+    render_outputs = save_rollout_outputs(
+        output_dir=output_dir,
+        manifest=manifest,
+        results=results,
+        render_results=[learned],
+        scenario=scenario,
+        args=args,
     )
-    write_json(output_dir / "metrics.json", manifest)
-    write_frame_csv(output_dir / "per_frame.csv", results)
-    plot_diagnostics(output_dir / "diagnostics.png", results)
-
-    render_output: Path | None = None
-    if args.render_format != "none":
-        render_output = output_dir / f"rollout_compare.{args.render_format}"
-        render_comparison(
-            output=render_output,
-            results=results,
-            scenario=scenario,
-            fps=args.fps,
-            stride=args.render_stride,
-            format_name=args.render_format,
-        )
 
     print(f"单 motion rollout 对比完成：{output_dir}")
-    if render_output is not None:
+    print(f"baseline 来源：{baseline_dir}")
+    for render_output in render_outputs:
         print(f"渲染输出：{render_output}")
     print(
         "summary: "
-        f"mlp failed={learned_summary['failed']} "
-        f"newton failed={newton_summary['failed']} "
-        f"fixed_gd failed={fixed_gd_summary['failed']} "
-        f"line_search_gd failed={line_search_gd_summary['failed']} "
-        f"mlp_ratio_mean={learned_summary['residual_ratio_mean']} "
-        f"newton_ratio_mean={newton_summary['residual_ratio_mean']} "
-        f"fixed_gd_ratio_mean={fixed_gd_summary['residual_ratio_mean']} "
-        f"line_search_gd_ratio_mean={line_search_gd_summary['residual_ratio_mean']}"
+        + " ".join(
+            f"{summary['solver']}_ratio_mean={summary['residual_ratio_mean']}"
+            for summary in summaries
+        )
     )
 
 
