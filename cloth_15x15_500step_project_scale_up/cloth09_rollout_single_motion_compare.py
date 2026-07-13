@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import math
 import os
 from pathlib import Path
@@ -50,11 +50,20 @@ from scenario_templates import (
 DEFAULT_ROOT = Path("cloth_15x15_scale_up_pipeline")
 
 
+@dataclass(frozen=True)
+class InnerConvergence:
+    enabled: bool
+    residual_ratio_tol: float
+    absolute_residual_tol: float
+    step_rms_tol: float
+    step_residual_ratio_guard: float
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run one reference-free scale-up rollout with a trained model and "
-            "compare it to a mass-preconditioned gradient baseline."
+            "compare it to Newton and gradient-descent baselines."
         )
     )
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -93,6 +102,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-step-size", type=float, default=1.0)
     parser.add_argument("--baseline-line-search-reductions", type=int, default=12)
     parser.add_argument("--fixed-gd-step-size", type=float, default=5e-5)
+    parser.add_argument("--line-search-gd-step-size", type=float, default=5e-5)
+    parser.add_argument("--line-search-gd-reductions", type=int, default=12)
+    parser.add_argument("--disable-inner-early-stop", action="store_true")
+    parser.add_argument("--convergence-residual-ratio-tol", type=float, default=1e-10)
+    parser.add_argument("--convergence-absolute-residual-tol", type=float, default=1e-10)
+    parser.add_argument("--convergence-step-rms-tol", type=float, default=1e-12)
+    parser.add_argument("--convergence-step-residual-ratio-guard", type=float, default=1e-8)
     parser.add_argument("--render-format", choices=("mp4", "gif", "none"), default="mp4")
     parser.add_argument("--render-stride", type=int, default=1)
     parser.add_argument("--fps", type=int, default=30)
@@ -210,6 +226,75 @@ def _finite_float(value: torch.Tensor, default: float = float("nan")) -> float:
     return scalar if math.isfinite(scalar) else float(default)
 
 
+def convergence_from_args(args: argparse.Namespace) -> InnerConvergence:
+    return InnerConvergence(
+        enabled=not bool(args.disable_inner_early_stop),
+        residual_ratio_tol=float(args.convergence_residual_ratio_tol),
+        absolute_residual_tol=float(args.convergence_absolute_residual_tol),
+        step_rms_tol=float(args.convergence_step_rms_tol),
+        step_residual_ratio_guard=float(args.convergence_step_residual_ratio_guard),
+    )
+
+
+def validate_convergence(config: InnerConvergence) -> None:
+    if config.residual_ratio_tol <= 0:
+        raise ValueError("--convergence-residual-ratio-tol must be positive")
+    if config.absolute_residual_tol <= 0:
+        raise ValueError("--convergence-absolute-residual-tol must be positive")
+    if config.step_rms_tol <= 0:
+        raise ValueError("--convergence-step-rms-tol must be positive")
+    if config.step_residual_ratio_guard <= 0:
+        raise ValueError("--convergence-step-residual-ratio-guard must be positive")
+
+
+def normalized_free_step(
+    before: torch.Tensor,
+    after: torch.Tensor,
+    params,
+) -> float:
+    delta = (after.reshape_as(before) - before).reshape(params.batch_size, params.num_vertices, 3)
+    free = free_update_gate(params).to(delta.dtype)
+    free_count = (~params.fixed_mask).sum(dim=-1).clamp_min(1).to(delta.dtype)
+    rms = torch.sqrt(torch.sum((delta * free).square(), dim=(-2, -1)) / free_count)
+    scale = params.rest_lengths.mean(dim=-1).clamp_min(torch.finfo(params.dtype).tiny)
+    return _finite_float((rms / scale)[0])
+
+
+def convergence_reason(
+    *,
+    initial_residual: float,
+    current_residual: float,
+    normalized_step: float | None,
+    config: InnerConvergence,
+) -> str | None:
+    if not config.enabled:
+        return None
+    if not math.isfinite(current_residual):
+        return None
+    denominator = max(float(initial_residual), 1e-300)
+    ratio = float(current_residual) / denominator
+    if current_residual <= config.absolute_residual_tol:
+        return "absolute_residual"
+    if ratio <= config.residual_ratio_tol:
+        return "relative_residual"
+    if (
+        normalized_step is not None
+        and math.isfinite(normalized_step)
+        and normalized_step <= config.step_rms_tol
+        and ratio <= config.step_residual_ratio_guard
+    ):
+        return "step_rms_guarded"
+    return None
+
+
+def padded_curve(curve: Sequence[float], length: int) -> list[float]:
+    values = [float(value) for value in curve]
+    if len(values) >= length:
+        return values[:length]
+    fill = values[-1] if values else float("nan")
+    return values + [fill] * (length - len(values))
+
+
 def frame_diagnostics(
     *,
     y: torch.Tensor,
@@ -308,6 +393,90 @@ def fixed_gradient_descent_step(
 
 
 @torch.no_grad()
+def line_search_gradient_descent_step(
+    *,
+    y: torch.Tensor,
+    q: torch.Tensor,
+    params,
+    targets: torch.Tensor,
+    step_size: float,
+    max_reductions: int,
+    c1: float = 1e-4,
+) -> tuple[torch.Tensor, bool, float]:
+    energy = variational_energy(y, q, params, targets)
+    residual = stationarity_residual(y, q, params, targets).reshape(params.batch_size, -1)
+    direction = -residual * free_update_gate(params, flattened=True).to(params.dtype)
+    directional = torch.sum(residual * direction, dim=-1)
+    y_flat = y.reshape(params.batch_size, -1)
+    scale = float(step_size)
+    for _ in range(max(0, max_reductions) + 1):
+        candidate = project_positions(y_flat + scale * direction, params, targets)
+        candidate_energy = variational_energy(candidate, q, params, targets)
+        armijo_rhs = energy + c1 * scale * directional
+        accepted = (
+            torch.isfinite(candidate).flatten(start_dim=1).all(dim=1)
+            & torch.isfinite(candidate_energy)
+            & (candidate_energy <= armijo_rhs)
+        )
+        if bool(accepted[0].item()):
+            return candidate.reshape_as(y), True, scale
+        scale *= 0.5
+    return y, False, 0.0
+
+
+def newton_step(
+    *,
+    y: torch.Tensor,
+    q: torch.Tensor,
+    params,
+    targets: torch.Tensor,
+) -> tuple[torch.Tensor, bool, dict[str, int]]:
+    if params.batch_size != 1:
+        raise ValueError("newton_step currently supports one scenario at a time")
+    free_mask = free_update_gate(params, flattened=True)[0].bool()
+    if not bool(free_mask.any()):
+        return y.detach(), True, {
+            "linear_solve_failures": 0,
+        }
+
+    base = project_positions(y, params, targets).reshape(1, -1)[0].detach()
+    x0 = base[free_mask].clone().detach()
+
+    def assemble(free_values: torch.Tensor) -> torch.Tensor:
+        full = base.clone()
+        full[free_mask] = free_values
+        return full.reshape(1, params.num_vertices, 3)
+
+    def energy_of_free(free_values: torch.Tensor) -> torch.Tensor:
+        return variational_energy(assemble(free_values), q, params, targets)[0]
+
+    residual = stationarity_residual(
+        base.reshape(1, params.num_vertices, 3),
+        q,
+        params,
+        targets,
+    ).reshape(1, -1)[0, free_mask]
+    hessian = torch.autograd.functional.hessian(
+        energy_of_free,
+        x0,
+        vectorize=False,
+    )
+    hessian = 0.5 * (hessian + hessian.transpose(-1, -2))
+    direction, info = torch.linalg.solve_ex(hessian, -residual.unsqueeze(-1))
+    direction = direction.squeeze(-1)
+    linear_solve_failures = int(bool(torch.any(info != 0)) or not bool(torch.isfinite(direction).all()))
+    if linear_solve_failures:
+        return y.detach(), False, {
+            "linear_solve_failures": linear_solve_failures,
+        }
+    candidate = project_positions(assemble(x0 + direction), params, targets)
+    accepted = bool(torch.isfinite(candidate).all())
+    return candidate.detach(), accepted, {
+        "linear_solve_failures": 0 if accepted else 1,
+    }
+
+
+@torch.no_grad()
 def run_model_rollout(
     *,
     model: LearnedOptimizerMLP,
@@ -317,6 +486,7 @@ def run_model_rollout(
     device: torch.device,
     dtype: torch.dtype,
     thresholds: FailureThresholds,
+    convergence: InnerConvergence,
 ) -> dict[str, Any]:
     params = build_batched_parameters((scenario,), device=device, dtype=dtype)
     p = params.initial_positions.clone()
@@ -341,8 +511,11 @@ def run_model_rollout(
         previous_update = torch.zeros_like(previous_residual)
         curve = [frame_diagnostics(y=y, q=q, params=params, targets=targets, thresholds=thresholds)["residual"]]
         energy_before = variational_energy(y, q, params, targets)
+        convergence_hit = False
+        convergence_hit_reason = ""
 
         for _ in range(inner_steps):
+            y_before = y.clone()
             y_next, delta, current = apply_model_update(
                 model,
                 y,
@@ -355,15 +528,24 @@ def run_model_rollout(
             y = y_next.reshape_as(y)
             previous_residual = current
             previous_update = delta
-            curve.append(
-                frame_diagnostics(
-                    y=y,
-                    q=q,
-                    params=params,
-                    targets=targets,
-                    thresholds=thresholds,
-                )["residual"]
+            current_residual = frame_diagnostics(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                thresholds=thresholds,
+            )["residual"]
+            curve.append(current_residual)
+            reason = convergence_reason(
+                initial_residual=curve[0],
+                current_residual=current_residual,
+                normalized_step=normalized_free_step(y_before, y, params),
+                config=convergence,
             )
+            if reason is not None:
+                convergence_hit = True
+                convergence_hit_reason = reason
+                break
 
         diagnostics = frame_diagnostics(
             y=y,
@@ -381,10 +563,13 @@ def run_model_rollout(
                 "residual_ratio": curve[-1] / max(curve[0], torch.finfo(dtype).eps),
                 "energy_before": _finite_float(energy_before[0]),
                 "energy_after": _finite_float(energy_after[0]),
+                "inner_steps_used": len(curve) - 1,
+                "inner_converged": convergence_hit,
+                "convergence_reason": convergence_hit_reason,
             }
         )
         frame_rows.append(diagnostics)
-        residual_curve.append(curve)
+        residual_curve.append(padded_curve(curve, inner_steps + 1))
         if diagnostics["failed"]:
             failure_frame = frame
             positions.append(p[0].detach().cpu())
@@ -393,7 +578,7 @@ def run_model_rollout(
         positions.append(p[0].detach().cpu())
 
     return {
-        "solver": "learned",
+        "solver": "mlp",
         "positions": torch.stack(positions, dim=0),
         "residual_by_frame_and_iteration": torch.tensor(residual_curve, dtype=torch.float64),
         "frames": frame_rows,
@@ -514,6 +699,7 @@ def run_fixed_gd_rollout(
     dtype: torch.dtype,
     thresholds: FailureThresholds,
     step_size: float,
+    convergence: InnerConvergence,
 ) -> dict[str, Any]:
     params = build_batched_parameters((scenario,), device=device, dtype=dtype)
     p = params.initial_positions.clone()
@@ -544,8 +730,11 @@ def run_fixed_gd_rollout(
             )["residual"]
         ]
         energy_before = variational_energy(y, q, params, targets)
+        convergence_hit = False
+        convergence_hit_reason = ""
 
         for _ in range(inner_steps):
+            y_before = y.clone()
             y = fixed_gradient_descent_step(
                 y=y,
                 q=q,
@@ -553,15 +742,24 @@ def run_fixed_gd_rollout(
                 targets=targets,
                 step_size=step_size,
             ).reshape_as(y)
-            curve.append(
-                frame_diagnostics(
-                    y=y,
-                    q=q,
-                    params=params,
-                    targets=targets,
-                    thresholds=thresholds,
-                )["residual"]
+            current_residual = frame_diagnostics(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                thresholds=thresholds,
+            )["residual"]
+            curve.append(current_residual)
+            reason = convergence_reason(
+                initial_residual=curve[0],
+                current_residual=current_residual,
+                normalized_step=normalized_free_step(y_before, y, params),
+                config=convergence,
             )
+            if reason is not None:
+                convergence_hit = True
+                convergence_hit_reason = reason
+                break
 
         diagnostics = frame_diagnostics(
             y=y,
@@ -580,10 +778,13 @@ def run_fixed_gd_rollout(
                 "energy_before": _finite_float(energy_before[0]),
                 "energy_after": _finite_float(energy_after[0]),
                 "fixed_step_size": float(step_size),
+                "inner_steps_used": len(curve) - 1,
+                "inner_converged": convergence_hit,
+                "convergence_reason": convergence_hit_reason,
             }
         )
         frame_rows.append(diagnostics)
-        residual_curve.append(curve)
+        residual_curve.append(padded_curve(curve, inner_steps + 1))
         if diagnostics["failed"]:
             failure_frame = frame
             positions.append(p[0].detach().cpu())
@@ -602,6 +803,249 @@ def run_fixed_gd_rollout(
     }
 
 
+@torch.no_grad()
+def run_line_search_gd_rollout(
+    *,
+    scenario: ScenarioSpec,
+    rollout_frames: int,
+    inner_steps: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    thresholds: FailureThresholds,
+    step_size: float,
+    max_reductions: int,
+    convergence: InnerConvergence,
+) -> dict[str, Any]:
+    params = build_batched_parameters((scenario,), device=device, dtype=dtype)
+    p = params.initial_positions.clone()
+    v = params.initial_velocities.clone()
+    positions = [p[0].detach().cpu()]
+    residual_curve = []
+    frame_rows: list[dict[str, Any]] = []
+    failure_frame: int | None = None
+    line_search_failures = 0
+
+    for frame in range(rollout_frames):
+        if failure_frame is not None:
+            positions.append(p[0].detach().cpu())
+            residual_curve.append([float("nan")] * (inner_steps + 1))
+            frame_rows.append({"frame": frame, "failed": True})
+            continue
+
+        q = make_q(p, v, params)
+        next_time = torch.full((1,), (frame + 1) * params.dt, dtype=dtype, device=device)
+        targets, _ = dirichlet_targets(params, next_time)
+        y = project_positions(p, params, targets)
+        curve = [
+            frame_diagnostics(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                thresholds=thresholds,
+            )["residual"]
+        ]
+        energy_before = variational_energy(y, q, params, targets)
+        accepted_scales: list[float] = []
+        convergence_hit = False
+        convergence_hit_reason = ""
+
+        for _ in range(inner_steps):
+            y_before = y.clone()
+            y, accepted, accepted_scale = line_search_gradient_descent_step(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                step_size=step_size,
+                max_reductions=max_reductions,
+            )
+            if not accepted:
+                line_search_failures += 1
+            accepted_scales.append(float(accepted_scale))
+            current_residual = frame_diagnostics(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                thresholds=thresholds,
+            )["residual"]
+            curve.append(current_residual)
+            reason = convergence_reason(
+                initial_residual=curve[0],
+                current_residual=current_residual,
+                normalized_step=normalized_free_step(y_before, y, params),
+                config=convergence,
+            )
+            if reason is not None:
+                convergence_hit = True
+                convergence_hit_reason = reason
+                break
+
+        diagnostics = frame_diagnostics(
+            y=y,
+            q=q,
+            params=params,
+            targets=targets,
+            thresholds=thresholds,
+        )
+        energy_after = variational_energy(y, q, params, targets)
+        nonzero_scales = [value for value in accepted_scales if value > 0.0]
+        diagnostics.update(
+            {
+                "frame": frame,
+                "initial_residual": curve[0],
+                "final_residual": curve[-1],
+                "residual_ratio": curve[-1] / max(curve[0], torch.finfo(dtype).eps),
+                "energy_before": _finite_float(energy_before[0]),
+                "energy_after": _finite_float(energy_after[0]),
+                "accepted_step_min": min(nonzero_scales) if nonzero_scales else 0.0,
+                "accepted_step_median": (
+                    sorted(nonzero_scales)[len(nonzero_scales) // 2]
+                    if nonzero_scales
+                    else 0.0
+                ),
+                "inner_steps_used": len(curve) - 1,
+                "inner_converged": convergence_hit,
+                "convergence_reason": convergence_hit_reason,
+            }
+        )
+        frame_rows.append(diagnostics)
+        residual_curve.append(padded_curve(curve, inner_steps + 1))
+        if diagnostics["failed"]:
+            failure_frame = frame
+            positions.append(p[0].detach().cpu())
+            continue
+        p, v = advance_state(p, y, params, next_time=next_time)
+        positions.append(p[0].detach().cpu())
+
+    return {
+        "solver": "line_search_gd",
+        "positions": torch.stack(positions, dim=0),
+        "residual_by_frame_and_iteration": torch.tensor(residual_curve, dtype=torch.float64),
+        "frames": frame_rows,
+        "failure_frame": failure_frame,
+        "line_search_failures": line_search_failures,
+        "initial_step_size": float(step_size),
+    }
+
+
+def run_newton_rollout(
+    *,
+    scenario: ScenarioSpec,
+    rollout_frames: int,
+    inner_steps: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    thresholds: FailureThresholds,
+    convergence: InnerConvergence,
+) -> dict[str, Any]:
+    params = build_batched_parameters((scenario,), device=device, dtype=dtype)
+    p = params.initial_positions.clone()
+    v = params.initial_velocities.clone()
+    positions = [p[0].detach().cpu()]
+    residual_curve = []
+    frame_rows: list[dict[str, Any]] = []
+    failure_frame: int | None = None
+    linear_solve_failures = 0
+
+    for frame in range(rollout_frames):
+        if failure_frame is not None:
+            positions.append(p[0].detach().cpu())
+            residual_curve.append([float("nan")] * (inner_steps + 1))
+            frame_rows.append({"frame": frame, "failed": True})
+            continue
+
+        with torch.no_grad():
+            q = make_q(p, v, params)
+            next_time = torch.full((1,), (frame + 1) * params.dt, dtype=dtype, device=device)
+            targets, _ = dirichlet_targets(params, next_time)
+            y = project_positions(p, params, targets)
+            curve = [
+                frame_diagnostics(
+                    y=y,
+                    q=q,
+                    params=params,
+                    targets=targets,
+                    thresholds=thresholds,
+                )["residual"]
+            ]
+            energy_before = variational_energy(y, q, params, targets)
+        convergence_hit = False
+        convergence_hit_reason = ""
+
+        for _ in range(inner_steps):
+            y_before = y.clone()
+            y, accepted, stats = newton_step(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+            )
+            linear_solve_failures += int(stats["linear_solve_failures"])
+            with torch.no_grad():
+                current_residual = frame_diagnostics(
+                    y=y,
+                    q=q,
+                    params=params,
+                    targets=targets,
+                    thresholds=thresholds,
+                )["residual"]
+                curve.append(current_residual)
+                reason = convergence_reason(
+                    initial_residual=curve[0],
+                    current_residual=current_residual,
+                    normalized_step=normalized_free_step(y_before, y, params),
+                    config=convergence,
+                )
+                if reason is not None:
+                    convergence_hit = True
+                    convergence_hit_reason = reason
+                    break
+
+        with torch.no_grad():
+            diagnostics = frame_diagnostics(
+                y=y,
+                q=q,
+                params=params,
+                targets=targets,
+                thresholds=thresholds,
+            )
+            energy_after = variational_energy(y, q, params, targets)
+            diagnostics.update(
+                {
+                    "frame": frame,
+                    "initial_residual": curve[0],
+                    "final_residual": curve[-1],
+                    "residual_ratio": curve[-1] / max(curve[0], torch.finfo(dtype).eps),
+                    "energy_before": _finite_float(energy_before[0]),
+                    "energy_after": _finite_float(energy_after[0]),
+                    "newton_step_accepted": bool(accepted),
+                    "inner_steps_used": len(curve) - 1,
+                    "inner_converged": convergence_hit,
+                    "convergence_reason": convergence_hit_reason,
+                }
+            )
+            frame_rows.append(diagnostics)
+            residual_curve.append(padded_curve(curve, inner_steps + 1))
+            if diagnostics["failed"]:
+                failure_frame = frame
+                positions.append(p[0].detach().cpu())
+                continue
+            p, v = advance_state(p, y, params, next_time=next_time)
+            positions.append(p[0].detach().cpu())
+
+    return {
+        "solver": "newton",
+        "positions": torch.stack(positions, dim=0),
+        "residual_by_frame_and_iteration": torch.tensor(residual_curve, dtype=torch.float64),
+        "frames": frame_rows,
+        "failure_frame": failure_frame,
+        "line_search_failures": 0,
+        "linear_solve_failures": linear_solve_failures,
+    }
+
+
 def finite_mean(values: list[float]) -> float | None:
     finite = [float(value) for value in values if math.isfinite(float(value))]
     if not finite:
@@ -614,6 +1058,12 @@ def summarize_rollout(result: dict[str, Any], rollout_frames: int) -> dict[str, 
     valid = [row for row in frame_rows if not bool(row.get("failed", False))]
     final_residual = [float(row.get("final_residual", float("nan"))) for row in valid]
     ratios = [float(row.get("residual_ratio", float("nan"))) for row in valid]
+    inner_steps_used = [
+        float(row["inner_steps_used"])
+        for row in valid
+        if "inner_steps_used" in row and math.isfinite(float(row["inner_steps_used"]))
+    ]
+    converged = [bool(row.get("inner_converged", False)) for row in valid]
     energy_increases = [
         float(row["energy_after"]) > float(row["energy_before"])
         for row in valid
@@ -630,6 +1080,12 @@ def summarize_rollout(result: dict[str, Any], rollout_frames: int) -> dict[str, 
         "failure_frame": failure_frame,
         "final_residual_mean": finite_mean(final_residual),
         "residual_ratio_mean": finite_mean(ratios),
+        "inner_steps_used_mean": finite_mean(inner_steps_used),
+        "inner_convergence_fraction": (
+            float(sum(converged) / len(converged))
+            if converged
+            else None
+        ),
         "energy_increase_fraction": (
             float(sum(energy_increases) / len(energy_increases))
             if energy_increases
@@ -658,6 +1114,26 @@ def write_frame_csv(path: Path, results: Sequence[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def worst_residual_frame(results: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    best = {
+        "frame": 0,
+        "solver": "",
+        "final_residual": float("-inf"),
+    }
+    for result in results:
+        for row in result["frames"]:
+            value = float(row.get("final_residual", float("nan")))
+            if math.isfinite(value) and value > best["final_residual"]:
+                best = {
+                    "frame": int(row["frame"]),
+                    "solver": str(result["solver"]),
+                    "final_residual": value,
+                }
+    if not math.isfinite(float(best["final_residual"])):
+        return {"frame": 0, "solver": "", "final_residual": float("nan")}
+    return best
+
+
 def plot_diagnostics(output: Path, results: Sequence[dict[str, Any]]) -> None:
     import matplotlib
 
@@ -665,7 +1141,9 @@ def plot_diagnostics(output: Path, results: Sequence[dict[str, Any]]) -> None:
     import matplotlib.pyplot as plt
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 1, figsize=(8.0, 7.0), sharex=True)
+    worst = worst_residual_frame(results)
+    worst_frame = int(worst["frame"])
+    fig, axes = plt.subplots(3, 1, figsize=(8.0, 10.0), sharex=False)
     colors = ("tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple")
     for index, result in enumerate(results):
         frames = [int(row["frame"]) for row in result["frames"]]
@@ -674,11 +1152,29 @@ def plot_diagnostics(output: Path, results: Sequence[dict[str, Any]]) -> None:
         color = colors[index % len(colors)]
         axes[0].plot(frames, residual, label=result["solver"], color=color)
         axes[1].plot(frames, ratio, label=result["solver"], color=color)
+        inner = result.get("residual_by_frame_and_iteration")
+        if torch.is_tensor(inner) and inner.ndim == 2 and worst_frame < inner.shape[0]:
+            curve = inner[worst_frame].detach().cpu().double()
+            finite = torch.isfinite(curve)
+            if bool(finite.any()):
+                x = list(range(int(curve.shape[0])))
+                y = [float(value) for value in curve.tolist()]
+                axes[2].plot(x, y, label=result["solver"], color=color)
     axes[0].set_yscale("log")
     axes[0].set_ylabel("final residual")
+    axes[0].axvline(worst_frame, color="0.25", linestyle="--", linewidth=1.0)
+    axes[0].set_title(
+        f"worst final residual frame={worst_frame} "
+        f"solver={worst['solver']} value={float(worst['final_residual']):.3e}"
+    )
     axes[1].set_yscale("log")
     axes[1].set_ylabel("residual ratio")
     axes[1].set_xlabel("physical frame")
+    axes[1].axvline(worst_frame, color="0.25", linestyle="--", linewidth=1.0)
+    axes[2].set_yscale("log")
+    axes[2].set_xlabel("inner iteration")
+    axes[2].set_ylabel("residual")
+    axes[2].set_title(f"inner residual at frame {worst_frame}")
     for axis in axes:
         axis.grid(True, which="both", alpha=0.25)
         axis.legend()
@@ -725,9 +1221,11 @@ def render_comparison(
     position_arrays = [result["positions"][::stride].numpy() for result in results]
     center, radius = axis_box(*position_arrays)
 
-    fig = plt.figure(figsize=(6.0 * len(results), 6.0))
+    cols = 2 if len(results) > 1 else 1
+    rows = int(math.ceil(len(results) / cols))
+    fig = plt.figure(figsize=(6.0 * cols, 5.5 * rows))
     axes = [
-        fig.add_subplot(1, len(results), index + 1, projection="3d")
+        fig.add_subplot(rows, cols, index + 1, projection="3d")
         for index in range(len(results))
     ]
     artists = []
@@ -789,7 +1287,7 @@ def render_comparison(
     animation = FuncAnimation(
         fig,
         update,
-        frames=len(learned_positions),
+        frames=min(len(array) for array in position_arrays),
         interval=1000 / fps,
         blit=False,
     )
@@ -811,8 +1309,12 @@ def main() -> None:
         raise ValueError("--baseline-step-size must be positive")
     if args.fixed_gd_step_size <= 0:
         raise ValueError("--fixed-gd-step-size must be positive")
+    if args.line_search_gd_step_size <= 0:
+        raise ValueError("--line-search-gd-step-size must be positive")
     if args.render_stride <= 0:
         raise ValueError("--render-stride must be positive")
+    convergence = convergence_from_args(args)
+    validate_convergence(convergence)
 
     run_dir = run_directory(args)
     selected_checkpoint = checkpoint_path(args, run_dir)
@@ -864,16 +1366,16 @@ def main() -> None:
         device=device,
         dtype=dtype,
         thresholds=thresholds,
+        convergence=convergence,
     )
-    baseline = run_baseline_rollout(
+    newton = run_newton_rollout(
         scenario=scenario,
         rollout_frames=args.rollout_frames,
         inner_steps=args.inner_steps,
         device=device,
         dtype=dtype,
         thresholds=thresholds,
-        step_size=args.baseline_step_size,
-        max_reductions=args.baseline_line_search_reductions,
+        convergence=convergence,
     )
     fixed_gd = run_fixed_gd_rollout(
         scenario=scenario,
@@ -883,13 +1385,32 @@ def main() -> None:
         dtype=dtype,
         thresholds=thresholds,
         step_size=args.fixed_gd_step_size,
+        convergence=convergence,
+    )
+    line_search_gd = run_line_search_gd_rollout(
+        scenario=scenario,
+        rollout_frames=args.rollout_frames,
+        inner_steps=args.inner_steps,
+        device=device,
+        dtype=dtype,
+        thresholds=thresholds,
+        step_size=args.line_search_gd_step_size,
+        max_reductions=args.line_search_gd_reductions,
+        convergence=convergence,
     )
 
     learned_summary = summarize_rollout(learned, args.rollout_frames)
-    baseline_summary = summarize_rollout(baseline, args.rollout_frames)
+    newton_summary = summarize_rollout(newton, args.rollout_frames)
     fixed_gd_summary = summarize_rollout(fixed_gd, args.rollout_frames)
-    results = [learned, baseline, fixed_gd]
-    summaries = [learned_summary, baseline_summary, fixed_gd_summary]
+    line_search_gd_summary = summarize_rollout(line_search_gd, args.rollout_frames)
+    results = [learned, newton, fixed_gd, line_search_gd]
+    summaries = [
+        learned_summary,
+        newton_summary,
+        fixed_gd_summary,
+        line_search_gd_summary,
+    ]
+    worst_frame = worst_residual_frame(results)
     manifest = {
         "checkpoint": str(selected_checkpoint),
         "checkpoint_update": int(checkpoint.get("update_count", 0)),
@@ -912,17 +1433,25 @@ def main() -> None:
         "device": str(device),
         "rollout_frames": int(args.rollout_frames),
         "inner_steps": int(args.inner_steps),
+        "inner_early_stop": asdict(convergence),
+        "worst_final_residual_frame": worst_frame,
         "baselines": [
             {
-                "solver": "mass_preconditioned_gd",
-                "step_size": float(args.baseline_step_size),
-                "line_search": "energy non-increase backtracking",
-                "line_search_reductions": int(args.baseline_line_search_reductions),
+                "solver": "newton",
+                "line_search": None,
+                "damping": None,
+                "state": "free degrees of freedom only",
             },
             {
                 "solver": fixed_gd["solver"],
                 "step_size": float(args.fixed_gd_step_size),
                 "line_search": None,
+            },
+            {
+                "solver": "line_search_gd",
+                "step_size": float(args.line_search_gd_step_size),
+                "line_search": "Armijo backtracking",
+                "line_search_reductions": int(args.line_search_gd_reductions),
             },
         ],
         "summaries": summaries,
@@ -930,9 +1459,10 @@ def main() -> None:
     torch.save(
         {
             "manifest": manifest,
-            "learned": learned,
-            "baseline": baseline,
+            "mlp": learned,
+            "newton": newton,
             "fixed_gd": fixed_gd,
+            "line_search_gd": line_search_gd,
             "results": results,
         },
         output_dir / "rollout_compare.pt",
@@ -958,12 +1488,14 @@ def main() -> None:
         print(f"渲染输出：{render_output}")
     print(
         "summary: "
-        f"learned failed={learned_summary['failed']} "
-        f"baseline failed={baseline_summary['failed']} "
+        f"mlp failed={learned_summary['failed']} "
+        f"newton failed={newton_summary['failed']} "
         f"fixed_gd failed={fixed_gd_summary['failed']} "
-        f"learned_ratio_mean={learned_summary['residual_ratio_mean']} "
-        f"baseline_ratio_mean={baseline_summary['residual_ratio_mean']} "
-        f"fixed_gd_ratio_mean={fixed_gd_summary['residual_ratio_mean']}"
+        f"line_search_gd failed={line_search_gd_summary['failed']} "
+        f"mlp_ratio_mean={learned_summary['residual_ratio_mean']} "
+        f"newton_ratio_mean={newton_summary['residual_ratio_mean']} "
+        f"fixed_gd_ratio_mean={fixed_gd_summary['residual_ratio_mean']} "
+        f"line_search_gd_ratio_mean={line_search_gd_summary['residual_ratio_mean']}"
     )
 
 

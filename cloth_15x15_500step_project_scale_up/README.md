@@ -866,6 +866,7 @@ python cloth09_rollout_single_motion_compare.py \
   --rollout-frames 500 \
   --inner-steps 50 \
   --fixed-gd-step-size 5e-5 \
+  --line-search-gd-step-size 5e-5 \
   --render-format mp4 \
   --fps 30 \
   --overwrite
@@ -894,6 +895,7 @@ python cloth09_rollout_single_motion_compare.py \
   --rollout-frames 500 \
   --inner-steps 50 \
   --fixed-gd-step-size 5e-5 \
+  --line-search-gd-step-size 5e-5 \
   --render-format mp4 \
   --overwrite
 ```
@@ -915,6 +917,7 @@ python cloth09_rollout_single_motion_compare.py \
   --rollout-frames 500 \
   --inner-steps 50 \
   --fixed-gd-step-size 5e-5 \
+  --line-search-gd-step-size 5e-5 \
   --render-format mp4 \
   --overwrite
 ```
@@ -948,11 +951,37 @@ per_frame.csv
 rollout_compare.pt
 ```
 
-当前会同时输出三个求解器：
+`rollout_compare.mp4` 按网格排布 solver；默认四个 solver 时为上面两个、下面两个。`diagnostics.png` 包含 frame-level residual、frame-level residual ratio，以及 final residual 最大的物理帧上的 residual-vs-iteration 曲线；前两张图会用虚线标出该 worst frame。
 
-- `learned`：训练得到的 learned optimizer；
-- `mass_preconditioned_gd`：质量预条件 residual 梯度下降，带能量不增的回退线搜索；
+当前默认会同时输出四个求解器：
+
+- `mlp`：训练得到的 learned optimizer；
+- `newton`：自由自由度上的原始 Newton，直接解 `H Δ = -r`，不加阻尼，不做 line search；
 - `gd_fixed_lr_5e-5`：原始 residual/gradient 的固定步长 GD，默认 `lr=5e-5`，不带线搜索。
+- `line_search_gd`：原始 residual/gradient 的 GD，默认初始步长 `5e-5`，带 Armijo 回退线搜索。
+
+旧的 `mass_preconditioned_gd` 实现仍保留在脚本中用于需要时手工改用，但默认不进入 `rollout_compare.mp4`、`diagnostics.png`、`per_frame.csv` 和 `metrics.json`。
+
+每个物理帧内默认开启 inner iteration 早停，因此 `--inner-steps 50` 表示每帧最多 50 次迭代，而不是强制每帧都执行 50 次。默认收敛判据为：
+
+- residual 绝对值 `r_k <= 1e-10`；
+- 或相对 residual `r_k / r_0 <= 1e-10`；
+- 或归一化 RMS step `<= 1e-12` 且 `r_k / r_0 <= 1e-8`。
+
+第三条不是裸位移范数，而是按自由点数量和平均 rest length 归一化，并且要求 residual 已经明显下降，避免把停滞误判为收敛。`per_frame.csv` 会记录每帧的 `inner_steps_used`、`inner_converged` 和 `convergence_reason`。如需禁用早停，添加：
+
+```bash
+--disable-inner-early-stop
+```
+
+如需调整阈值，可使用：
+
+```bash
+--convergence-residual-ratio-tol 1e-10
+--convergence-absolute-residual-tol 1e-10
+--convergence-step-rms-tol 1e-12
+--convergence-step-residual-ratio-guard 1e-8
+```
 
 这些 baseline 用于单条轨迹诊断，不替代 `cloth07` 的最终批量稳定性评估。
 
