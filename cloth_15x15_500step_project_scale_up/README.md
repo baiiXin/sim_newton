@@ -54,6 +54,7 @@ cloth_15x15_500step_project_scale_up/
 ├── cloth06_probe_memory_and_throughput.py
 ├── cloth07_evaluate_best_checkpoint.py
 ├── cloth08_run_end_to_end.py
+├── cloth09_rollout_single_motion_compare.py
 │
 ├── test_scenario_catalogue.py
 ├── test_batched_physics.py
@@ -74,6 +75,7 @@ cloth_15x15_500step_project_scale_up/
 | `cloth06_probe_memory_and_throughput.py` | 独立子进程显存与吞吐量扫描 |
 | `cloth07_evaluate_best_checkpoint.py` | best checkpoint 的长 validation 和分组 test |
 | `cloth08_run_end_to_end.py` | 显存测试、6 小时训练和最终评估的一键入口 |
+| `cloth09_rollout_single_motion_compare.py` | 单个 motion 的 K 步 rollout、渲染和 baseline 对比 |
 
 ---
 
@@ -821,6 +823,114 @@ python cloth07_evaluate_best_checkpoint.py \
 ```
 
 默认评估 `best_validation_model.pt`。如需评估某个 periodic checkpoint，可添加 `--checkpoint-update 20000`；如需启用 bias，添加 `--use-bias`。
+
+### 13.5 单 motion rollout 渲染与 baseline 对比
+
+`cloth07_evaluate_best_checkpoint.py` 是 validation/test 全量批评估，不渲染单条轨迹，也不做 baseline 对比。若要先选一条 motion 检查固定 `K=50` 的 rollout，使用：
+
+```bash
+python cloth09_rollout_single_motion_compare.py \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --activation relu \
+  --depth 1 \
+  --width 2048 \
+  --seed 42 \
+  --device cuda:0 \
+  --split test \
+  --motion-index 0 \
+  --rollout-frames 500 \
+  --inner-steps 50 \
+  --fixed-gd-step-size 5e-5 \
+  --render-format mp4 \
+  --fps 30 \
+  --overwrite
+```
+
+默认 checkpoint 为当前 run directory 下的：
+
+```text
+best_validation_model.pt
+```
+
+也可以显式指定 checkpoint：
+
+```bash
+python cloth09_rollout_single_motion_compare.py \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --activation relu \
+  --depth 1 \
+  --width 2048 \
+  --seed 42 \
+  --device cuda:0 \
+  --checkpoint cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_relu_depth_01_width_2048_no_bias/seed_42/latest_checkpoint.pt \
+  --split test \
+  --motion-index 0 \
+  --rollout-frames 500 \
+  --inner-steps 50 \
+  --fixed-gd-step-size 5e-5 \
+  --render-format mp4 \
+  --overwrite
+```
+
+或者按 periodic update 选择：
+
+```bash
+python cloth09_rollout_single_motion_compare.py \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --activation relu \
+  --depth 1 \
+  --width 2048 \
+  --seed 42 \
+  --device cuda:0 \
+  --checkpoint-update 25000 \
+  --split test \
+  --motion-index 0 \
+  --rollout-frames 500 \
+  --inner-steps 50 \
+  --fixed-gd-step-size 5e-5 \
+  --render-format mp4 \
+  --overwrite
+```
+
+选择 motion index 前，可以先列出 split 中的基本信息：
+
+```bash
+python cloth09_rollout_single_motion_compare.py \
+  --catalogue c2 \
+  --split test \
+  --list-motions \
+  --list-offset 0 \
+  --list-limit 32
+```
+
+`--split test` 对应 `test_256`，motion index 范围为 `0..255`；`--split validation` 对应 `validation_128`，范围为 `0..127`；`--split train --catalogue c2` 对应 `train_c2_2048`，范围为 `0..2047`。列表会显示 `scenario_id`、test group、difficulty、固定点边界、Dirichlet 运动、材料、初始速度、初始形状、预应变和朝向。
+
+输出目录默认在：
+
+```text
+cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_relu_depth_01_width_2048_no_bias/seed_42/single_motion_rollouts/
+```
+
+单条 rollout 会保存：
+
+```text
+rollout_compare.mp4
+diagnostics.png
+metrics.json
+per_frame.csv
+rollout_compare.pt
+```
+
+当前会同时输出三个求解器：
+
+- `learned`：训练得到的 learned optimizer；
+- `mass_preconditioned_gd`：质量预条件 residual 梯度下降，带能量不增的回退线搜索；
+- `gd_fixed_lr_5e-5`：原始 residual/gradient 的固定步长 GD，默认 `lr=5e-5`，不带线搜索。
+
+这些 baseline 用于单条轨迹诊断，不替代 `cloth07` 的最终批量稳定性评估。
 
 ---
 
