@@ -55,6 +55,7 @@ cloth_15x15_500step_project_scale_up/
 ├── cloth07_evaluate_best_checkpoint.py
 ├── cloth08_run_end_to_end.py
 ├── cloth09_rollout_single_motion_compare.py
+├── cloth10_plot_initial_states.py
 │
 ├── test_scenario_catalogue.py
 ├── test_batched_physics.py
@@ -76,6 +77,7 @@ cloth_15x15_500step_project_scale_up/
 | `cloth07_evaluate_best_checkpoint.py` | best checkpoint 的长 validation 和分组 test |
 | `cloth08_run_end_to_end.py` | 显存测试、6 小时训练和最终评估的一键入口 |
 | `cloth09_rollout_single_motion_compare.py` | 单个 motion 的 K 步 rollout、渲染和 baseline 对比 |
+| `cloth10_plot_initial_states.py` | catalogue 中每个 motion 的初始形状、速度和固定点概览图 |
 
 ---
 
@@ -757,6 +759,28 @@ python cloth01_build_scenario_catalogue.py \
 ```bash
 python cloth01_build_scenario_catalogue.py --audit-only
 ```
+
+生成各 dataset 的初始状态概览图：
+
+```bash
+python cloth10_plot_initial_states.py \
+  --root cloth_15x15_scale_up_pipeline \
+  --datasets validation_128 test_256 \
+  --dpi 100
+```
+
+默认输出到：
+
+```text
+cloth_15x15_scale_up_pipeline/data/figure/
+├── train_c1_1024/
+├── train_c2_2048/
+├── train_c3_3072/
+├── validation_128/
+└── test_256/
+```
+
+每个子目录包含 `motion_XXXX_scenario_YYYYYY.png` 和 `index.csv`。图中蓝点为自由点，红色方块为固定点，绿色箭头为初速度方向。若要生成全部 catalogue，省略 `--datasets`；若要先测试少量图片，可加 `--max-count 16`。
 
 ### 13.2 显存测试
 
