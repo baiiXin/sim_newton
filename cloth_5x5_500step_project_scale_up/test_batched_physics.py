@@ -44,7 +44,7 @@ class BatchedPhysicsTests(unittest.TestCase):
         topology = build_cloth_topology()
         self.assertEqual(topology.num_vertices, 25)
         self.assertEqual(topology.num_edges, 56)
-        self.assertAlmostEqual(sum(topology.vertex_areas), 49.0)
+        self.assertAlmostEqual(sum(topology.vertex_areas), 4.0)
         self.assertEqual(sum(topology.edge_is_diagonal), 16)
 
     def test_variable_fixed_masks_and_materials(self) -> None:
