@@ -50,14 +50,6 @@ from scenario_templates import (
 
 DEFAULT_ROOT = Path("cloth_5x5_scale_up_pipeline")
 BASELINE_SUBDIR = "single_motion_rollout_baseline"
-REQUIRED_BASELINE_SOLVERS = (
-    "gd_fixed_lr_5e-5",
-    "line_search_gd",
-    "mass_preconditioned_gd_fixed",
-    "mass_preconditioned_line_search_gd",
-    "lbfgs_line_search_h5",
-    "newton",
-)
 
 
 @dataclass(frozen=True)
@@ -250,6 +242,14 @@ def checkpoint_run_dir(checkpoint: Path, fallback: Path) -> Path:
     return fallback
 
 
+def checkpoint_full_state_dim(checkpoint: dict[str, Any]) -> int:
+    state = checkpoint.get("model_state_dict", {})
+    weight = state.get("output_layer.weight")
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+        raise ValueError("checkpoint is missing model_state_dict['output_layer.weight']")
+    return int(weight.shape[0])
+
+
 def baseline_output_dir(args: argparse.Namespace) -> Path:
     name = (
         f"{split_key(args.split, args.catalogue)}_"
@@ -258,6 +258,10 @@ def baseline_output_dir(args: argparse.Namespace) -> Path:
         f"k{args.inner_steps:03d}"
     )
     return args.root / BASELINE_SUBDIR / name
+
+
+def fixed_gd_solver_name(step_size: float) -> str:
+    return "gd_fixed_lr_5e-5" if step_size == 5e-5 else f"gd_fixed_lr_{step_size:g}"
 
 
 def baseline_dtype(args: argparse.Namespace) -> torch.dtype:
@@ -979,7 +983,7 @@ def run_fixed_gd_rollout(
         positions.append(p[0].detach().cpu())
 
     return {
-        "solver": "gd_fixed_lr_5e-5" if step_size == 5e-5 else f"gd_fixed_lr_{step_size:g}",
+        "solver": fixed_gd_solver_name(step_size),
         "positions": torch.stack(positions, dim=0),
         "residual_by_frame_and_iteration": torch.tensor(residual_curve, dtype=torch.float64),
         "frames": frame_rows,
@@ -2032,7 +2036,7 @@ def baseline_manifest(
         "inner_early_stop": asdict(convergence),
         "baselines": [
             {
-                "solver": "gd_fixed_lr_5e-5",
+                "solver": fixed_gd_solver_name(args.fixed_gd_step_size),
                 "step_size": float(args.fixed_gd_step_size),
                 "line_search": None,
             },
@@ -2072,7 +2076,18 @@ def baseline_manifest(
     }
 
 
-def baseline_is_complete(output_dir: Path) -> bool:
+def required_baseline_solvers(args: argparse.Namespace) -> tuple[str, ...]:
+    return (
+        fixed_gd_solver_name(args.fixed_gd_step_size),
+        "line_search_gd",
+        "mass_preconditioned_gd_fixed",
+        "mass_preconditioned_line_search_gd",
+        f"lbfgs_line_search_h{args.lbfgs_history_size}",
+        "newton",
+    )
+
+
+def baseline_is_complete(output_dir: Path, args: argparse.Namespace) -> bool:
     metrics_path = output_dir / "metrics.json"
     payload_path = output_dir / "rollout_compare.pt"
     if not metrics_path.exists() or not payload_path.exists():
@@ -2085,7 +2100,14 @@ def baseline_is_complete(output_dir: Path) -> bool:
         return False
     summaries = metrics.get("summaries", [])
     solvers = {str(row.get("solver", "")) for row in summaries if isinstance(row, dict)}
-    return set(REQUIRED_BASELINE_SOLVERS).issubset(solvers)
+    if not set(required_baseline_solvers(args)).issubset(solvers):
+        return False
+    for baseline in metrics.get("baselines", []):
+        if not isinstance(baseline, dict):
+            continue
+        if baseline.get("solver") == fixed_gd_solver_name(args.fixed_gd_step_size):
+            return float(baseline.get("step_size", float("nan"))) == float(args.fixed_gd_step_size)
+    return False
 
 
 def load_baseline_results(output_dir: Path) -> list[dict[str, Any]]:
@@ -2107,7 +2129,7 @@ def run_and_save_baseline_suite(
     strict_existing: bool,
 ) -> tuple[list[dict[str, Any]], Path, list[Path]]:
     output_dir = args.output_dir if args.output_dir is not None and args.mode == "baseline" else baseline_output_dir(args)
-    if output_dir.exists() and strict_existing and not args.overwrite and baseline_is_complete(output_dir):
+    if output_dir.exists() and strict_existing and not args.overwrite and baseline_is_complete(output_dir, args):
         print(f"baseline cache 已完成，跳过：{output_dir}")
         return load_baseline_results(output_dir), output_dir, []
     device = torch.device(args.device)
@@ -2151,7 +2173,7 @@ def load_or_create_baselines(
     convergence: InnerConvergence,
 ) -> tuple[list[dict[str, Any]], Path]:
     output_dir = baseline_output_dir(args)
-    if baseline_is_complete(output_dir) and not args.refresh_baseline:
+    if baseline_is_complete(output_dir, args) and not args.refresh_baseline:
         print(f"baseline cache 已完成，读取：{output_dir}")
         return load_baseline_results(output_dir), output_dir
     results, output_dir, _ = run_and_save_baseline_suite(
@@ -2254,7 +2276,7 @@ def main() -> None:
     dtype = resolve_dtype(args.dtype, checkpoint)
     spec = ModelSpec(**checkpoint["model_spec"])
     model = LearnedOptimizerMLP(
-        full_state_dim=15 * 15 * 3,
+        full_state_dim=checkpoint_full_state_dim(checkpoint),
         model_spec=spec,
         dtype=dtype,
     ).to(device)
@@ -2313,7 +2335,7 @@ def main() -> None:
         "worst_final_residual_frame": worst_frame,
         "baselines": [
             {
-                "solver": "gd_fixed_lr_5e-5",
+                "solver": fixed_gd_solver_name(args.fixed_gd_step_size),
                 "step_size": float(args.fixed_gd_step_size),
                 "line_search": None,
             },
