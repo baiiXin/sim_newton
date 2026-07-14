@@ -1,9 +1,6 @@
 name: Generate 5x5 cloth scale-up project
 
 on:
-  push:
-    branches:
-      - agent/cloth-5x5-scale-up
   pull_request:
     branches:
       - main
@@ -57,7 +54,6 @@ jobs:
               ("'rows': 15", "'rows': 5"),
               ("'cols': 15", "'cols': 5"),
           )
-
           grid_integer_replacements = {225: 25, 675: 75, 616: 56, 196: 16}
 
           changed = []
@@ -128,8 +124,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m compileall -q cloth_5x5_500step_project_scale_up
           test "$(find cloth_5x5_500step_project_scale_up -type f | wc -l)" -eq "$(find cloth_15x15_500step_project_scale_up -type f | wc -l)"
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('cloth_5x5_500step_project_scale_up')
+          for path in sorted(root.rglob('*.py')):
+              compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+          print('all Python files compile successfully')
+          PY
           git diff --exit-code -- cloth_15x15_500step_project_scale_up
           grep -q '^DEFAULT_ROWS = 5$' cloth_5x5_500step_project_scale_up/cloth02_batched_physics.py
           grep -q '^DEFAULT_COLS = 5$' cloth_5x5_500step_project_scale_up/cloth02_batched_physics.py
