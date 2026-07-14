@@ -31,17 +31,19 @@ jobs:
           text = readme.read_text(encoding='utf-8')
           old = '可映射到 5×5、5×5 或其他规则网格。'
           new = '可映射到 5×5、15×15 或其他规则网格。'
-          if old not in text:
-              raise SystemExit(f'missing expected README text: {old}')
-          readme.write_text(text.replace(old, new, 1), encoding='utf-8')
+          if old in text:
+              readme.write_text(text.replace(old, new, 1), encoding='utf-8')
+          elif new not in text:
+              raise SystemExit('unexpected README boundary-mapping text')
 
           test_file = root / 'test_batched_physics.py'
           text = test_file.read_text(encoding='utf-8')
           old = 'self.assertAlmostEqual(sum(topology.vertex_areas), 49.0)'
           new = 'self.assertAlmostEqual(sum(topology.vertex_areas), 4.0)'
-          if old not in text:
-              raise SystemExit(f'missing expected area assertion: {old}')
-          test_file.write_text(text.replace(old, new, 1), encoding='utf-8')
+          if old in text:
+              test_file.write_text(text.replace(old, new, 1), encoding='utf-8')
+          elif new not in text:
+              raise SystemExit('unexpected topology area assertion')
           PY
 
       - name: Install CPU test dependencies
@@ -52,14 +54,19 @@ jobs:
           python -m pip install numpy pytest
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Run complete project tests
+      - name: Run complete project tests and save report
+        id: tests
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           cd cloth_5x5_500step_project_scale_up
-          pytest -q
+          pytest -q > TEST_RESULTS.txt 2>&1
+          status=$?
+          cat TEST_RESULTS.txt
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Commit validated fixes
+      - name: Commit fixes and test report
         shell: bash
         run: |
           set -euo pipefail
@@ -67,5 +74,10 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A cloth_5x5_500step_project_scale_up .github/workflows/agent_test_cloth_5x5.yml
-          git commit -m 'fix 5x5 topology assertions and documentation'
+          git commit -m 'record 5x5 test results and topology fixes'
           git push origin HEAD:agent/cloth-5x5-scale-up
+
+      - name: Enforce test success
+        shell: bash
+        run: |
+          test "${{ steps.tests.outputs.exit_status }}" -eq 0
