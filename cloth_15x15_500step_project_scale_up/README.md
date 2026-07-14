@@ -1019,16 +1019,18 @@ per_frame.csv
 rollout_compare.pt
 ```
 
-视频按 solver 分开渲染，不再合成网格视频。baseline 模式会输出 `rollout_gd_fixed_lr_5e-5.mp4`、`rollout_line_search_gd.mp4`、`rollout_mass_preconditioned_line_search_gd.mp4` 和 `rollout_newton.mp4`。MLP 模式会读取 baseline 数据参与绘图和 CSV/PT 保存，但只渲染自己的 `rollout_mlp.mp4`，不重复渲染 baseline 视频。`diagnostics.png` 包含 frame-level residual、frame-level residual ratio，以及 final residual 最大的物理帧上的 residual-vs-iteration 曲线；前两张图会用虚线标出该 worst frame。`line_search_times_vs_frame.png` 画每个物理帧内 line search 候选步长评估次数。
+视频按 solver 分开渲染，不再合成网格视频。baseline 模式会分别输出每个 baseline 的 `rollout_<solver>.mp4`。MLP 模式会读取 baseline 数据参与绘图和 CSV/PT 保存，但只渲染自己的 `rollout_mlp.mp4`，不重复渲染 baseline 视频。`diagnostics.png` 包含 frame-level residual、frame-level residual ratio、worst frame 的 residual-vs-iteration 曲线，以及 median frame 的 residual-vs-iteration 曲线；前两张图会用虚线标出 worst frame 和 median frame。`line_search_times_vs_frame.png` 画每个物理帧内 line search 候选步长评估次数。
 
-baseline cache 默认包含四个求解器：
+baseline cache 默认包含六个求解器：
 
 - `gd_fixed_lr_5e-5`：原始 residual/gradient 的固定步长 GD，默认 `lr=5e-5`，不带线搜索。
 - `line_search_gd`：原始 residual/gradient 的 GD，默认初始步长 `5e-5`，先做 Armijo 向上试探，再做回退线搜索，默认最多向上放大 8 次、回退 30 次。
+- `mass_preconditioned_gd_fixed`：质量预条件 residual 的固定步长 GD，默认步长 `1.0`，不带线搜索；
 - `mass_preconditioned_line_search_gd`：质量预条件 residual 的 GD，带能量不增回退线搜索；
+- `lbfgs_line_search_h5`：L-BFGS，history size `h=5`，默认初始步长 `a0=1`，带 Armijo 回退线搜索；
 - `newton`：自由自由度上的原始 Newton，直接解 `H Δ = -r`，不加阻尼，不做 line search。
 
-MLP 模式会在这四条 baseline 前再加一条 `mlp`。如果 baseline cache 已存在，默认直接读取；如需强制重跑 baseline，添加 `--refresh-baseline`。
+MLP 模式会在这些 baseline 前再加一条 `mlp`。如果完整 baseline cache 已存在，baseline 模式会直接跳过，MLP 模式会直接读取；如需强制重跑 baseline，添加 `--refresh-baseline` 或在 baseline 模式下加 `--overwrite`。
 
 每个物理帧内默认开启 inner iteration 早停，因此 `--inner-steps 50` 表示每帧最多 50 次迭代，而不是强制每帧都执行 50 次。默认收敛判据为：
 
