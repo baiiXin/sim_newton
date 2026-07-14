@@ -1,0 +1,148 @@
+name: Generate 5x5 cloth scale-up project
+
+on:
+  push:
+    branches:
+      - agent/cloth-5x5-scale-up
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Copy and adapt project
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import shutil
+
+          src = Path('cloth_15x15_500step_project_scale_up')
+          dst = Path('cloth_5x5_500step_project_scale_up')
+          if not src.is_dir():
+              raise SystemExit(f'missing source directory: {src}')
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(src, dst)
+
+          text_suffixes = {'.py', '.md', '.txt', '.toml', '.yaml', '.yml', '.json'}
+          literal_replacements = (
+              ('cloth_15x15_500step_project_scale_up', 'cloth_5x5_500step_project_scale_up'),
+              ('cloth_15x15_scale_up_pipeline', 'cloth_5x5_scale_up_pipeline'),
+              ('15×15', '5×5'),
+              ('15x15', '5x5'),
+              ('15 X 15', '5 X 5'),
+              ('15 x 15', '5 x 5'),
+              ('DEFAULT_ROWS = 15', 'DEFAULT_ROWS = 5'),
+              ('DEFAULT_COLS = 15', 'DEFAULT_COLS = 5'),
+              ('rows: int = 15', 'rows: int = 5'),
+              ('cols: int = 15', 'cols: int = 5'),
+              ('rows=15', 'rows=5'),
+              ('cols=15', 'cols=5'),
+              ('"rows": 15', '"rows": 5'),
+              ('"cols": 15', '"cols": 5'),
+              ("'rows': 15", "'rows': 5"),
+              ("'cols': 15", "'cols': 5"),
+          )
+
+          grid_integer_replacements = {
+              225: 25,
+              675: 75,
+              616: 56,
+              196: 16,
+          }
+
+          changed = []
+          for path in sorted(dst.rglob('*')):
+              if not path.is_file() or path.suffix.lower() not in text_suffixes:
+                  continue
+              original = path.read_text(encoding='utf-8')
+              text = original
+              for old, new in literal_replacements:
+                  text = text.replace(old, new)
+              for old, new in grid_integer_replacements.items():
+                  text = re.sub(rf'(?<![0-9.]){old}(?![0-9.])', str(new), text)
+              if text != original:
+                  path.write_text(text, encoding='utf-8')
+                  changed.append(str(path))
+
+          readme = dst / 'README.md'
+          text = readme.read_text(encoding='utf-8')
+          old_intro = '本目录在 `cloth_5x5_500step_project` 的基础上'
+          if old_intro in text:
+              text = text.replace(
+                  old_intro,
+                  '本目录由 `cloth_15x15_500step_project_scale_up` 等价迁移而来，并保持原实验逻辑；它在 `cloth_5x5_500step_project` 的基础上',
+                  1,
+              )
+          marker = '> 当前仓库已经完成代码、单元测试和 CPU 集成测试。'
+          note = (
+              '> **5×5 迁移说明：** catalogue、训练池、损失、验证、checkpoint、baseline 和 rollout 逻辑保持不变；'
+              '仅将默认规则网格从 15×15 改为 5×5，并同步默认输出目录、状态维数、拓扑统计和测试断言。\n\n'
+          )
+          if note.strip() not in text:
+              text = text.replace(marker, note + marker, 1)
+          readme.write_text(text, encoding='utf-8')
+
+          required = {
+              dst / 'scenario_geometry.py': ('rows: int = 5', 'cols: int = 5'),
+              dst / 'cloth02_batched_physics.py': ('DEFAULT_ROWS = 5', 'DEFAULT_COLS = 5'),
+          }
+          for path, needles in required.items():
+              body = path.read_text(encoding='utf-8')
+              for needle in needles:
+                  if needle not in body:
+                      raise SystemExit(f'{path}: expected {needle!r}')
+
+          forbidden = (
+              'cloth_15x15_500step_project_scale_up',
+              'cloth_15x15_scale_up_pipeline',
+              'DEFAULT_ROWS = 15',
+              'DEFAULT_COLS = 15',
+              'rows: int = 15',
+              'cols: int = 15',
+          )
+          for path in sorted(dst.rglob('*')):
+              if not path.is_file() or path.suffix.lower() not in text_suffixes:
+                  continue
+              body = path.read_text(encoding='utf-8')
+              for needle in forbidden:
+                  if needle in body:
+                      raise SystemExit(f'{path}: stale 15x15 token {needle!r}')
+
+          print(f'created {dst} with {sum(1 for p in dst.rglob("*") if p.is_file())} files')
+          print('modified copied files:')
+          for item in changed:
+              print(f'  {item}')
+          PY
+
+      - name: Static validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q cloth_5x5_500step_project_scale_up
+          test "$(find cloth_5x5_500step_project_scale_up -type f | wc -l)" -eq "$(find cloth_15x15_500step_project_scale_up -type f | wc -l)"
+          git diff --exit-code -- cloth_15x15_500step_project_scale_up
+          grep -q '^DEFAULT_ROWS = 5$' cloth_5x5_500step_project_scale_up/cloth02_batched_physics.py
+          grep -q '^DEFAULT_COLS = 5$' cloth_5x5_500step_project_scale_up/cloth02_batched_physics.py
+          ! grep -R 'cloth_15x15_scale_up_pipeline' cloth_5x5_500step_project_scale_up
+
+      - name: Commit generated project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/agent_generate_cloth_5x5.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A cloth_5x5_500step_project_scale_up .github/workflows/agent_generate_cloth_5x5.yml
+          git commit -m 'add 5x5 cloth scale-up project'
+          git push origin HEAD:agent/cloth-5x5-scale-up
