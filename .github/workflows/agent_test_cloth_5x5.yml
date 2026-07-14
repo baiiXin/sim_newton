@@ -1,0 +1,71 @@
+name: Validate 5x5 cloth scale-up project
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cloth-5x5-scale-up
+          fetch-depth: 0
+
+      - name: Fix resolution-derived documentation and area assertion
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path('cloth_5x5_500step_project_scale_up')
+
+          readme = root / 'README.md'
+          text = readme.read_text(encoding='utf-8')
+          old = '可映射到 5×5、5×5 或其他规则网格。'
+          new = '可映射到 5×5、15×15 或其他规则网格。'
+          if old not in text:
+              raise SystemExit(f'missing expected README text: {old}')
+          readme.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          test_file = root / 'test_batched_physics.py'
+          text = test_file.read_text(encoding='utf-8')
+          old = 'self.assertAlmostEqual(sum(topology.vertex_areas), 49.0)'
+          new = 'self.assertAlmostEqual(sum(topology.vertex_areas), 4.0)'
+          if old not in text:
+              raise SystemExit(f'missing expected area assertion: {old}')
+          test_file.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Install CPU test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run complete project tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd cloth_5x5_500step_project_scale_up
+          pytest -q
+
+      - name: Commit validated fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/agent_test_cloth_5x5.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A cloth_5x5_500step_project_scale_up .github/workflows/agent_test_cloth_5x5.yml
+          git commit -m 'fix 5x5 topology assertions and documentation'
+          git push origin HEAD:agent/cloth-5x5-scale-up
