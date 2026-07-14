@@ -1032,6 +1032,97 @@ baseline cache 默认包含六个求解器：
 
 MLP 模式会在这些 baseline 前再加一条 `mlp`。如果完整 baseline cache 已存在，baseline 模式会直接跳过，MLP 模式会直接读取；如需强制重跑 baseline，添加 `--refresh-baseline` 或在 baseline 模式下加 `--overwrite`。
 
+#### 扫描所有已训练模型并生成聚合对比图
+
+如果要把当前训练目录里已经训好的模型都跑同一个 single motion，可以使用批量扫描脚本：
+
+```bash
+python cloth12_scan_single_motion_rollouts.py \
+  --root cloth_15x15_scale_up_pipeline \
+  --catalogue c2 \
+  --seed 42 \
+  --device cuda:0 \
+  --split test \
+  --motion-index 0 \
+  --rollout-frames 500 \
+  --inner-steps 50 \
+  --fixed-gd-step-size 5e-5 \
+  --line-search-gd-step-size 5e-5 \
+  --render-format mp4 \
+  --fps 30
+```
+
+默认扫描：
+
+```text
+cloth_15x15_scale_up_pipeline/experiments/train_c2/*/seed_42/best_validation_model.pt
+```
+
+每个模型自己的单条 rollout 输出仍然放在模型对应目录下，例如：
+
+```text
+cloth_15x15_scale_up_pipeline/experiments/train_c2/<experiment>/seed_42/single_motion_rollout_scan/test_motion_0000_f500_k050_gd5em05_best/
+```
+
+这些目录保留单模型完整输出，包括：
+
+```text
+rollout_mlp.mp4
+diagnostics.png
+line_search_times_vs_frame.png
+metrics.json
+per_frame.csv
+rollout_compare.pt
+```
+
+扫描脚本还会在扫描目录写入汇总文件：
+
+```text
+cloth_15x15_scale_up_pipeline/single_motion_rollout_scans/c2_test_motion_0000_f500_k050_gd5em05_best_seed_42/
+```
+
+其中：
+
+```text
+summary.json
+commands.txt
+aggregate_plots/
+```
+
+`aggregate_plots/` 下默认生成四张跨模型对比图：
+
+```text
+01_final_residual_vs_frame.png
+02_residual_ratio_vs_frame.png
+03_inner_residual_worst_frame.png
+04_inner_residual_median_frame.png
+aggregate_manifest.json
+```
+
+其中第 3、4 张图会先在所有被画曲线中选择两帧：
+
+- worst frame：所有模型和保留 baseline 的 frame-level `final_residual` 最大值所在帧；
+- median frame：所有模型和保留 baseline 的 frame-level `final_residual` 排序后的中位数所在帧。
+
+然后在这两个物理帧上画 `residual vs. inner iteration`，用于对比每个模型和 baseline 在同一帧内的迭代收敛过程。`aggregate_manifest.json` 会记录实际选中的 worst/median frame、对应曲线和 residual 值。
+
+聚合图会画出扫描到的所有 MLP 模型；baseline 只保留两条曲线：
+
+- `newton`；
+- 固定步长 GD，默认 `gd_fixed_lr_5e-5`。
+
+注意：单模型输出的 `metrics.json`、`per_frame.csv` 和 `rollout_compare.pt` 仍包含完整 baseline 结果；“只保留 Newton 和固定步长 GD”只针对扫描目录里的聚合图。baseline cache 会检查当前请求的固定 GD 步长，避免把不同 `--fixed-gd-step-size` 的旧 cache 当作新结果复用。
+
+常用扫描选项：
+
+- `--dry-run`：只打印将要执行的命令，不跑 rollout；
+- `--checkpoint-kind latest`：扫描 `latest_checkpoint.pt`；
+- `--checkpoint-kind periodic --periodic-update 100000`：扫描指定 periodic checkpoint；
+- `--all-seeds`：扫描所有 `seed_*`；
+- `--include relu` / `--exclude tanh`：按 experiment 目录名筛选；
+- `--no-aggregate-plots`：只跑每个模型，不生成四张聚合图；
+- `--python /path/to/python`：指定用于启动 `cloth09` 的 Python 解释器。
+
 每个物理帧内默认开启 inner iteration 早停，因此 `--inner-steps 50` 表示每帧最多 50 次迭代，而不是强制每帧都执行 50 次。默认收敛判据为：
 
 - residual 绝对值 `r_k <= 1e-10`；
