@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/cloth-5x5-scale-up
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/cloth-5x5-scale-up
           fetch-depth: 0
 
       - name: Copy and adapt project
@@ -54,12 +58,7 @@ jobs:
               ("'cols': 15", "'cols': 5"),
           )
 
-          grid_integer_replacements = {
-              225: 25,
-              675: 75,
-              616: 56,
-              196: 16,
-          }
+          grid_integer_replacements = {225: 25, 675: 75, 616: 56, 196: 16}
 
           changed = []
           for path in sorted(dst.rglob('*')):
@@ -81,7 +80,7 @@ jobs:
           if old_intro in text:
               text = text.replace(
                   old_intro,
-                  '本目录由 `cloth_15x15_500step_project_scale_up` 等价迁移而来，并保持原实验逻辑；它在 `cloth_5x5_500step_project` 的基础上',
+                  '本目录由原 scale-up 项目等价迁移而来，并保持原实验逻辑；它在 `cloth_5x5_500step_project` 的基础上',
                   1,
               )
           marker = '> 当前仓库已经完成代码、单元测试和 CPU 集成测试。'
