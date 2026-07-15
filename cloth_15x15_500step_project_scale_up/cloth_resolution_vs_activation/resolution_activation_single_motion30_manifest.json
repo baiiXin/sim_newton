@@ -1,0 +1,93 @@
+{
+  "split": "test",
+  "motion_index": 30,
+  "rollout_frames": 500,
+  "inner_steps": 50,
+  "fixed_gd_step_size": 5e-05,
+  "metric_source": "per_frame.csv rows where solver == mlp, column final_residual",
+  "resolutions": {
+    "5x5": {
+      "root": "/data/zhoucy/sim_newton/cloth_5x5_500step_project_scale_up/cloth_5x5_scale_up_pipeline/experiments/train_c2",
+      "depth": 3,
+      "width": 256
+    },
+    "15x15": {
+      "root": "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_15x15_scale_up_pipeline/experiments/train_c2",
+      "depth": 1,
+      "width": 4096
+    }
+  },
+  "activations": [
+    "identity",
+    "relu",
+    "tanh"
+  ],
+  "summary_csv": "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_resolution_vs_activation/resolution_activation_single_motion30_residual_summary.csv",
+  "figures": [
+    "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_resolution_vs_activation/01_mean_residual_by_resolution_activation.png",
+    "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_resolution_vs_activation/02_max_residual_by_resolution_activation.png",
+    "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_resolution_vs_activation/03_p95_residual_by_resolution_activation.png"
+  ],
+  "records": [
+    {
+      "resolution": "5x5",
+      "activation": "identity",
+      "experiment": "activation_identity_depth_03_width_0256_no_bias",
+      "path": "/data/zhoucy/sim_newton/cloth_5x5_500step_project_scale_up/cloth_5x5_scale_up_pipeline/experiments/train_c2/activation_identity_depth_03_width_0256_no_bias/seed_42/single_motion_rollout_scan/test_motion_0030_f500_k050_gd5em05_best/per_frame.csv",
+      "frame_count": 500,
+      "mean_residual": 1282.6515111005872,
+      "max_residual": 10970.648347796214,
+      "p95_residual": 6644.014247217161
+    },
+    {
+      "resolution": "5x5",
+      "activation": "relu",
+      "experiment": "activation_relu_depth_03_width_0256_no_bias",
+      "path": "/data/zhoucy/sim_newton/cloth_5x5_500step_project_scale_up/cloth_5x5_scale_up_pipeline/experiments/train_c2/activation_relu_depth_03_width_0256_no_bias/seed_42/single_motion_rollout_scan/test_motion_0030_f500_k050_gd5em05_best/per_frame.csv",
+      "frame_count": 500,
+      "mean_residual": 0.00015479377158341133,
+      "max_residual": 0.04916405647008104,
+      "p95_residual": 7.771099522937924e-05
+    },
+    {
+      "resolution": "5x5",
+      "activation": "tanh",
+      "experiment": "activation_tanh_depth_03_width_0256_no_bias",
+      "path": "/data/zhoucy/sim_newton/cloth_5x5_500step_project_scale_up/cloth_5x5_scale_up_pipeline/experiments/train_c2/activation_tanh_depth_03_width_0256_no_bias/seed_42/single_motion_rollout_scan/test_motion_0030_f500_k050_gd5em05_best/per_frame.csv",
+      "frame_count": 500,
+      "mean_residual": 97.8545486110805,
+      "max_residual": 508.76446163415994,
+      "p95_residual": 246.49337168973688
+    },
+    {
+      "resolution": "15x15",
+      "activation": "identity",
+      "experiment": "activation_identity_depth_01_width_4096_no_bias",
+      "path": "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_identity_depth_01_width_4096_no_bias/seed_42/single_motion_rollout_scan/test_motion_0030_f500_k050_gd5em05_best/per_frame.csv",
+      "frame_count": 500,
+      "mean_residual": 0.38353523968766345,
+      "max_residual": 3.173908195993494,
+      "p95_residual": 0.789078750755071
+    },
+    {
+      "resolution": "15x15",
+      "activation": "relu",
+      "experiment": "activation_relu_depth_01_width_4096_no_bias",
+      "path": "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_relu_depth_01_width_4096_no_bias/seed_42/single_motion_rollout_scan/test_motion_0030_f500_k050_gd5em05_best/per_frame.csv",
+      "frame_count": 500,
+      "mean_residual": 0.003970404840177344,
+      "max_residual": 1.7060708107616895,
+      "p95_residual": 0.0013411127004649493
+    },
+    {
+      "resolution": "15x15",
+      "activation": "tanh",
+      "experiment": "activation_tanh_depth_01_width_4096_no_bias",
+      "path": "/data/zhoucy/sim_newton/cloth_15x15_500step_project_scale_up/cloth_15x15_scale_up_pipeline/experiments/train_c2/activation_tanh_depth_01_width_4096_no_bias/seed_42/single_motion_rollout_scan/test_motion_0030_f500_k050_gd5em05_best/per_frame.csv",
+      "frame_count": 500,
+      "mean_residual": 836.7781323905446,
+      "max_residual": 2104.5680015610556,
+      "p95_residual": 956.0279865779075
+    }
+  ]
+}
