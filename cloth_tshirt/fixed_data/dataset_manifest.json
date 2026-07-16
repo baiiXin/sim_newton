@@ -1,0 +1,70 @@
+{
+  "model": {
+    "version": 1,
+    "model_seed": 42,
+    "mesh_path": "t-shirt/tshirt_from_garment_meshes.obj",
+    "mesh_sha256": "99fa4555704a5c28472b40d710497e90f68b64113409898599a4743b5402f2fa",
+    "num_vertices": 4424,
+    "num_faces": 8710,
+    "num_edges": 13136,
+    "num_hinges": 12994,
+    "fixed_indices": [
+      2331,
+      89,
+      1331,
+      785
+    ],
+    "dt": 0.01,
+    "gravity": [
+      0.0,
+      -9.81,
+      0.0
+    ],
+    "material": {
+      "areal_density": 0.5515795414818455,
+      "lame_mu": 29233.04340904943,
+      "lame_lambda": 80636.0657482915,
+      "bending_stiffness": 6.499997037604635e-05,
+      "thickness": 0.00047
+    }
+  },
+  "dynamics_distribution": {
+    "translation_speed_max": 5.0,
+    "angular_speed_max": 3.0,
+    "smooth_velocity_rms_max": 2.0,
+    "high_frequency_velocity_rms_max": 2.5,
+    "velocity_clip": 12.0,
+    "position_perturb_rms_edge_fraction_max": 0.2,
+    "position_high_frequency_fraction": 0.15,
+    "min_area_ratio": 0.4,
+    "max_area_ratio": 2.5,
+    "min_singular_value": 0.45,
+    "max_condition_number": 4.0,
+    "max_position_sampling_attempts": 64
+  },
+  "evaluation_protocol": {
+    "validation_count": 32,
+    "test_count": 64,
+    "typical_count": 4,
+    "validation_seed": 20260721,
+    "test_seed": 20260722,
+    "typical_seed": 20260723,
+    "quick_inner_steps": 15,
+    "full_inner_steps": 50,
+    "convergence_residual_ratio": 0.001,
+    "two_order_single_step_ratio": 0.01
+  },
+  "mesh": {
+    "connected_component_sizes": [
+      4424
+    ],
+    "boundary_edges": 142,
+    "median_edge_length": 0.013745244777501473,
+    "rest_area": 0.6730958641965098
+  },
+  "training_policy": {
+    "persist_individual_training_motions": false,
+    "sample_when_environment_resets": true,
+    "checkpoint_rng_state": true
+  }
+}

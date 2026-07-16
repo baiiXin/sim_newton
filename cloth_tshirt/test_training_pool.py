@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import unittest
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
+
+if torch is not None:
+    from cloth02_batched_physics import FrozenMotionBatch, load_physics
+    from cloth03_training_pool import (
+        LearnedOptimizerMLP,
+        ModelSpec,
+        OnlineTrainingPool,
+        apply_model_update,
+        training_step,
+    )
+    from cloth09_rollout_single_motion import SingleMotionSettings, run_solver_rollout
+
+
+@unittest.skipIf(torch is None, "PyTorch is not installed in this runtime")
+class TrainingPoolTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.physics = load_physics(dtype=torch.float64)
+
+    def test_online_pool_is_reproducible_but_does_not_store_dataset(self) -> None:
+        first = OnlineTrainingPool(
+            physics=self.physics, seed=77, pool_size=4, batch_size=4, k_buckets=(1,)
+        )
+        second = OnlineTrainingPool(
+            physics=self.physics, seed=77, pool_size=4, batch_size=4, k_buckets=(1,)
+        )
+        torch.testing.assert_close(first.p, second.p, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(first.v, second.v, rtol=0.0, atol=0.0)
+        self.assertFalse(first.manifest()["training_samples_persisted"])
+
+    def test_zero_output_model_respects_fixed_gate(self) -> None:
+        pool = OnlineTrainingPool(
+            physics=self.physics, seed=91, pool_size=4, batch_size=4, k_buckets=(1,)
+        )
+        model = LearnedOptimizerMLP(
+            physics=self.physics,
+            model_spec=ModelSpec(activation="relu", depth=1, width=16, use_bias=False),
+        )
+        batch = pool.ask()
+        y_next, delta, _ = apply_model_update(
+            model,
+            batch.y,
+            batch.q,
+            batch.fixed_targets,
+            previous_residual=batch.previous_residual,
+            previous_update=batch.previous_update,
+        )
+        torch.testing.assert_close(delta, torch.zeros_like(delta))
+        torch.testing.assert_close(
+            y_next[:, self.physics.fixed_mask], batch.fixed_targets[:, self.physics.fixed_mask]
+        )
+
+    def test_one_training_step_backpropagates(self) -> None:
+        pool = OnlineTrainingPool(
+            physics=self.physics, seed=101, pool_size=4, batch_size=4, k_buckets=(1,)
+        )
+        model = LearnedOptimizerMLP(
+            physics=self.physics,
+            model_spec=ModelSpec(activation="relu", depth=1, width=16, use_bias=False),
+        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        metrics = training_step(model=model, optimizer=optimizer, pool=pool)
+        self.assertTrue(torch.isfinite(torch.tensor(metrics["loss"])))
+        self.assertGreater(metrics["gradient_norm_before_clip"], 0.0)
+
+    def test_single_motion_uses_the_full_inner_iteration_budget(self) -> None:
+        rest = self.physics.rest_positions.unsqueeze(0)
+        motion = FrozenMotionBatch(
+            motion_ids=("fixed_budget_contract",),
+            positions=rest,
+            velocities=torch.zeros_like(rest),
+            seeds=torch.tensor((0,), dtype=torch.long),
+        )
+        result = run_solver_rollout(
+            solver="gd_fixed",
+            physics=self.physics,
+            motion=motion,
+            settings=SingleMotionSettings(
+                rollout_frames=1,
+                inner_steps=3,
+                residual_ratio_tolerance=2.0,
+                fixed_gd_step_size=0.0,
+                trajectory_stride=1,
+                early_stop=False,
+            ),
+        )
+        self.assertEqual(int(result.curves["inner_steps"][0]), 3)
+        self.assertTrue(result.summary["fixed_inner_iteration_budget"])
+
+
+if __name__ == "__main__":
+    unittest.main()

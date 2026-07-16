@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "model_seed": 42,
+  "mesh_path": "t-shirt/tshirt_from_garment_meshes.obj",
+  "mesh_sha256": "99fa4555704a5c28472b40d710497e90f68b64113409898599a4743b5402f2fa",
+  "num_vertices": 4424,
+  "num_faces": 8710,
+  "num_edges": 13136,
+  "num_hinges": 12994,
+  "fixed_indices": [
+    2331,
+    89,
+    1331,
+    785
+  ],
+  "dt": 0.01,
+  "gravity": [
+    0.0,
+    -9.81,
+    0.0
+  ],
+  "material": {
+    "areal_density": 0.5515795414818455,
+    "lame_mu": 29233.04340904943,
+    "lame_lambda": 80636.0657482915,
+    "bending_stiffness": 6.499997037604635e-05,
+    "thickness": 0.00047
+  }
+}

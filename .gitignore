@@ -112,6 +112,14 @@ cloth_5x5_metamizer_pool_training/
 cloth_15x15_500step_pipeline/
 cloth_15x15_scale_up_pipeline/
 cloth_5x5_scale_up_pipeline/
+cloth_tshirt_pipeline/
+
+# T-shirt fixed evaluation initial states are intentional, reproducible test
+# fixtures.  Training motions remain online-only and are never written here.
+!cloth_tshirt/fixed_data/
+cloth_tshirt/fixed_data/figures/
+!cloth_tshirt/fixed_data/*.json
+!cloth_tshirt/fixed_data/*.npz
 # =========================
 
 ## Project-specific result folders

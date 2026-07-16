@@ -1,0 +1,147 @@
+{
+  "count": 4,
+  "motions": [
+    {
+      "motion_id": "typical_00_horizontal_gravity_release",
+      "split": "typical",
+      "description": "Garment plane horizontal, zero initial velocity, gravity-only swing.",
+      "rotation_matrix": [
+        [
+          0.9996522071802559,
+          -0.01737350411007948,
+          0.01984001095210509
+        ],
+        [
+          0.01737350411007948,
+          -0.1321308896339628,
+          -0.9910800115830581
+        ],
+        [
+          0.01984001095210509,
+          0.9910800115830581,
+          -0.13178309681421863
+        ]
+      ],
+      "velocity_rms": 0.0,
+      "velocity_max": 0.0,
+      "min_area_ratio": 0.9999999999999813,
+      "max_area_ratio": 1.000000000000015,
+      "min_singular_value": 0.9999999999999819,
+      "max_condition_number": 1.0000000000000175
+    },
+    {
+      "motion_id": "typical_01_vertical_rest_release",
+      "split": "typical",
+      "description": "Original HOOD pose, zero initial velocity, gravity-only release.",
+      "rotation_matrix": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "velocity_rms": 0.0,
+      "velocity_max": 0.0,
+      "min_area_ratio": 0.9999999999999915,
+      "max_area_ratio": 1.0000000000000162,
+      "min_singular_value": 0.9999999999999912,
+      "max_condition_number": 1.0000000000000162
+    },
+    {
+      "motion_id": "typical_02_high_frequency_velocity",
+      "split": "typical_random",
+      "seed": 3678064178253428865,
+      "rotation_matrix": [
+        [
+          0.8211265950208818,
+          0.38694716422984177,
+          0.4195509588165622
+        ],
+        [
+          0.5582170012839985,
+          -0.6976550430753024,
+          -0.4490781895718147
+        ],
+        [
+          0.11893231027316803,
+          0.6029505228176539,
+          -0.7888635956912988
+        ]
+      ],
+      "translation_velocity": [
+        0.22909470959190603,
+        -4.077820305352038,
+        -1.7972053221514708
+      ],
+      "angular_velocity": [
+        1.8012148720310819,
+        -0.11747123800046122,
+        -2.345407634959023
+      ],
+      "smooth_velocity_rms_requested": 1.0089041004957149,
+      "high_frequency_velocity_rms_requested": 2.415786018726764,
+      "velocity_rms": 5.206712644137415,
+      "velocity_max": 10.316207077162927,
+      "min_area_ratio": 0.9111955379365249,
+      "max_area_ratio": 1.1316138831061733,
+      "min_singular_value": 0.9196622390535747,
+      "max_condition_number": 1.1310247891253542,
+      "position_sampling_attempts": 2,
+      "position_perturbation_rms": 0.00024274584496654353,
+      "description": "Mixed rigid, smooth, and per-vertex high-frequency velocity field."
+    },
+    {
+      "motion_id": "typical_03_random_pose_and_velocity",
+      "split": "typical_random",
+      "seed": 1769129551112075939,
+      "rotation_matrix": [
+        [
+          -0.6564164767944733,
+          -0.7405064388227007,
+          0.14410976044270113
+        ],
+        [
+          -0.19444868714910757,
+          0.35064912473052445,
+          0.9160976473016977
+        ],
+        [
+          -0.7289081677815934,
+          0.5733196363180306,
+          -0.3741623679012118
+        ]
+      ],
+      "translation_velocity": [
+        -0.21174427582842714,
+        0.17848595660296152,
+        -3.391739693194288
+      ],
+      "angular_velocity": [
+        2.114868164903352,
+        -0.49766402114766306,
+        2.079412577119128
+      ],
+      "smooth_velocity_rms_requested": 1.3858810763756118,
+      "high_frequency_velocity_rms_requested": 1.43819386624668,
+      "velocity_rms": 3.977817012289523,
+      "velocity_max": 8.208013165831847,
+      "min_area_ratio": 0.8569665802376447,
+      "max_area_ratio": 1.1984402882330265,
+      "min_singular_value": 0.8336708482271667,
+      "max_condition_number": 1.2411819073439934,
+      "position_sampling_attempts": 3,
+      "position_perturbation_rms": 0.0004986958418781278,
+      "description": "Random SO(3) pose with position perturbation and mixed velocity."
+    }
+  ]
+}
