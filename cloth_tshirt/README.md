@@ -26,24 +26,47 @@
 
 冻结验证/测试初值是有意的：如果测试时也在线重采样，模型之间和训练时刻之间会混入 Monte-Carlo 抽样噪声，回归结果不可复现，少量异常样本还会显著改变失败率。冻结的是独立随机抽取的初值，不是参考解或轨迹；训练仍保持无限在线采样。
 
-## 能量
+## 每个物理帧的优化目标与能量
 
-膜能采用 NVIDIA Newton VBD 使用的 stable Neo-Hookean surface density：
+每个物理帧将自由顶点的 implicit Euler 更新写成一个无约束变分问题；固定点在求值前直接投影到目标位置：
 
-\[
-\psi(F)=\frac{\mu}{2}(I_C-2)+\frac{\lambda+\mu}{2}(J-\alpha)^2
--\frac{\lambda+\mu}{2}(1-\alpha)^2,
-\qquad
-\alpha=1+\frac{\mu}{\lambda+\mu}.
-\]
+$$
+\begin{aligned}
+q_i &= x_i^n + \Delta t\,v_i^n + \Delta t^2 g, \\
+\mathcal{E}(y;q)
+&= \sum_{i\in\mathcal{V}_{\mathrm{free}}}
+   \frac{m_i}{2\Delta t^2}\lVert y_i-q_i\rVert_2^2
+   + E_m(y) + E_b(y).
+\end{aligned}
+$$
 
-最后一项只是把 OBJ 静止构型的能量数值平移到零。它不是根据当前构型重新拟合材料参数，也不改变力、Hessian、优化方向或解。OBJ 静止构型另外决定每个三角形的 `Dm^{-1}`。弯曲能为
+膜项采用 NVIDIA Newton VBD 的 stable Neo-Hookean density，并按静止三角形面积和厚度积分：
 
-\[
-E_b=\sum_h \frac{1}{2} k_b\,\ell_h^0\,\operatorname{wrap}(\theta_h-\theta_h^0)^2,
-\]
+$$
+\begin{aligned}
+E_m(y) &= t\sum_f A_f^0\,\psi(F_f),
+&F_f &= D_{s,f}D_{m,f}^{-1}, \\
+\psi(F) &= \frac{\mu}{2}(I_C-2)
+ + \frac{\lambda_{\mathrm{NH}}}{2}(J-\alpha)^2
+ - \frac{\lambda_{\mathrm{NH}}}{2}(1-\alpha)^2, \\
+I_C &= \operatorname{tr}(F^{\mathsf T}F)=\lVert F\rVert_F^2,
+&J &= \sqrt{\det(F^{\mathsf T}F)}, \\
+\lambda_{\mathrm{NH}} &= \lambda+\mu,
+&\alpha &= 1+\frac{\mu}{\lambda_{\mathrm{NH}}}.
+\end{aligned}
+$$
 
-其中每条内边的静止二面角 `theta0` 直接由 OBJ 计算，因此弯曲项在原始曲面也是零应力。材料范围来自 [HOOD post-CVPR 配置](https://github.com/Dolorousrtur/HOOD/blob/master/configs/postcvpr.yaml)，Neo-Hookean 与二面角实现参照 [NVIDIA Newton VBD cloth kernels](https://github.com/newton-physics/newton/blob/main/newton/_src/solvers/vbd/particle_vbd_kernels.py)。
+这里的 $A_f^0$、$D_{m,f}^{-1}$ 都由 OBJ 静止构型确定，$t$ 是布料厚度。最后一个常数项只把静止构型的膜能数值平移到零，不改变力、Hessian、优化方向或解。弯曲能为
+
+$$
+\begin{aligned}
+E_b(y) &= \sum_h \frac{1}{2}k_b\,\ell_h^0
+\left[\operatorname{wrap}(\theta_h-\theta_h^0)\right]^2, \\
+\operatorname{wrap}(\phi) &= \operatorname{atan2}(\sin\phi,\cos\phi).
+\end{aligned}
+$$
+
+每条内边的静止长度 $\ell_h^0$ 和静止二面角 $\theta_h^0$ 都直接由 OBJ 计算，因此弯曲项在原始曲面也是零应力。材料范围来自 [HOOD post-CVPR 配置](https://github.com/Dolorousrtur/HOOD/blob/master/configs/postcvpr.yaml)，Neo-Hookean 与二面角实现参照 [NVIDIA Newton VBD cloth kernels](https://github.com/newton-physics/newton/blob/main/newton/_src/solvers/vbd/particle_vbd_kernels.py)。
 
 ## 1. 构建固定模型和固定评估初值
 
@@ -67,20 +90,53 @@ python cloth10_plot_initial_states.py --splits validation test typical
 
 ```bash
 python cloth06_probe_memory_and_throughput.py \
-  --device cuda:0 --dtype float64 \
-  --batch-sizes 4 8 16 32 64 128
+  --output-dir cloth_tshirt_pipeline/profiling/memory_probe \
+  --fixed-data-dir fixed_data \
+  --device cuda:0 \
+  --dtype float64 \
+  --seed 42 \
+  --activation relu \
+  --depth 1 \
+  --width 2048 \
+  --no-use-bias \
+  --pool-size 512 \
+  --batch-sizes 4 8 16 32 64 128 \
+  --warmup-updates 1 \
+  --measured-updates 3 \
+  --memory-headroom-fraction 0.85
 ```
 
-每个 batch size 都在独立子进程中执行完整的 `ask → residual/model → energy → backward → Adam → tell/reset checks`。结果包含 peak allocated/reserved memory，并只在 85% 显存余量内推荐吞吐率最高的 batch。
+显存测试会显式接收以下网络和训练规模参数：
+
+| 参数 | 默认值 | 含义与约束 |
+|---|---:|---|
+| `--activation` | `relu` | 隐藏层激活，可选 `identity/relu/gelu/silu/tanh` |
+| `--depth` | `1` | 隐藏线性层数量，必须为正整数 |
+| `--width` | `2048` | 每个隐藏层的宽度，必须为正整数 |
+| `--use-bias` / `--no-use-bias` | `--no-use-bias` | 是否为全部线性层启用 bias |
+| `--pool-size` | `512` | 常驻 GPU 的在线训练环境数；必须被 4 个 K buckets 整除 |
+| `--batch-sizes` | `4 8 16 32 64 128` | 待扫描的训练 batch；每项必须被 4 整除且不大于 pool size |
+
+每个候选 batch size 都在独立子进程中，用完全相同的网络和 pool 配置执行完整的 `ask → residual/model → energy → backward → Adam → tell/reset checks`。`--warmup-updates` 不计时，随后用 `--measured-updates` 统计吞吐和峰值；只有 `peak_reserved / total_memory <= memory_headroom_fraction` 的结果才参与推荐。
+
+完整 CLI 配置会打印到终端，并写入 `memory_probe.json` 和 `recommended_training_config.json` 的 `configuration` 字段；`memory_probe.json`/`memory_probe.csv` 的每个结果也会重复记录网络规格、pool size 和该次实际 batch size。推荐文件按显存阈值内 `motions_per_second` 最高的结果给出 `recommended_batch_size`，并一并保存网络宽度、深度、激活、bias 和 pool size，便于确认显存测试与正式训练完全一致。
 
 ## 3. 在线训练
 
 ```bash
 python cloth05_train_online.py \
-  --device cuda:0 --dtype float64 \
-  --pool-size 512 --batch-size 32 \
+  --device cuda:0 \
+  --dtype float64 \
+  --activation relu \
+  --depth 1 \
+  --width 2048 \
+  --no-use-bias \
+  --pool-size 512 \
+  --batch-size 32 \
   --max-wall-hours 10
 ```
+
+显存扫描使用复数参数 `--batch-sizes` 测多个候选值；正式训练使用单数参数 `--batch-size`。应把上例的 `32` 替换为 `recommended_training_config.json` 中的 `recommended_batch_size`，并保持 activation、depth、width、bias、dtype 和 pool size 与显存扫描一致。
 
 训练正常结束或收到 `Ctrl-C` 时都会保存 `latest_checkpoint.pt`；后者可用 `--resume` 恢复，包括在线采样 RNG 和 pool。训练结束会自动调用 `cloth11_plot_training_progress.py`，统一绘制 loss、残差比、梯度裁剪、pool reset 和两种验证曲线。
 

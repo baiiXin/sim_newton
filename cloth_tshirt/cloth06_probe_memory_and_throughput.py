@@ -16,28 +16,166 @@ from tshirt_config import DEFAULT_FIXED_DATA_DIR, DEFAULT_TRAIN_SEED, write_json
 
 DEFAULT_OUTPUT = Path("cloth_tshirt_pipeline/profiling/memory_probe")
 GIB = 1024 ** 3
+SUPPORTED_ACTIVATIONS = ("identity", "relu", "gelu", "silu", "tanh")
+DEFAULT_BATCH_SIZES = (4, 8, 16, 32, 64, 128)
+K_BUCKET_COUNT = 4
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--fixed-data-dir", type=Path, default=DEFAULT_FIXED_DATA_DIR)
-    parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
-    parser.add_argument("--seed", type=int, default=DEFAULT_TRAIN_SEED)
-    parser.add_argument("--activation", default="relu")
-    parser.add_argument("--depth", type=int, default=1)
-    parser.add_argument("--width", type=int, default=2048)
-    parser.add_argument("--use-bias", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--pool-size", type=int, default=512)
-    parser.add_argument("--batch-sizes", type=int, nargs="+", default=(4, 8, 16, 32, 64, 128))
-    parser.add_argument("--warmup-updates", type=int, default=1)
-    parser.add_argument("--measured-updates", type=int, default=3)
-    parser.add_argument("--memory-headroom-fraction", type=float, default=0.85)
-    parser.add_argument("--dry-run", action="store_true")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    paths = parser.add_argument_group("inputs and outputs")
+    paths.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="directory for per-worker, aggregate, and recommendation files",
+    )
+    paths.add_argument(
+        "--fixed-data-dir",
+        type=Path,
+        default=DEFAULT_FIXED_DATA_DIR,
+        help="fixed model and topology directory",
+    )
+
+    runtime = parser.add_argument_group("runtime")
+    runtime.add_argument("--device", default="cuda:0", help="CUDA device used by every worker")
+    runtime.add_argument(
+        "--dtype",
+        choices=("float64", "float32"),
+        default="float64",
+        help="model, physics, pool, and optimizer dtype",
+    )
+    runtime.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_TRAIN_SEED,
+        help="model initialization and online-pool seed",
+    )
+
+    network = parser.add_argument_group("network")
+    network.add_argument(
+        "--activation",
+        choices=SUPPORTED_ACTIVATIONS,
+        default="relu",
+        help="activation after every hidden linear layer",
+    )
+    network.add_argument("--depth", type=int, default=1, help="number of hidden linear layers")
+    network.add_argument("--width", type=int, default=2048, help="units in every hidden layer")
+    network.add_argument(
+        "--use-bias",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable or disable bias in all linear layers",
+    )
+
+    sweep = parser.add_argument_group("training pool and batch sweep")
+    sweep.add_argument(
+        "--pool-size",
+        type=int,
+        default=512,
+        help=f"resident online-training pool rows; must be divisible by {K_BUCKET_COUNT}",
+    )
+    sweep.add_argument(
+        "--batch-sizes",
+        type=int,
+        nargs="+",
+        metavar="N",
+        default=DEFAULT_BATCH_SIZES,
+        help=(
+            f"candidate training batch sizes; each must be divisible by {K_BUCKET_COUNT} "
+            "and no larger than pool size"
+        ),
+    )
+
+    measurement = parser.add_argument_group("measurement")
+    measurement.add_argument(
+        "--warmup-updates",
+        type=int,
+        default=1,
+        help="complete training updates before peak reset and timing",
+    )
+    measurement.add_argument(
+        "--measured-updates",
+        type=int,
+        default=3,
+        help="complete training updates included in timing",
+    )
+    measurement.add_argument(
+        "--memory-headroom-fraction",
+        type=float,
+        default=0.85,
+        help="maximum reserved/total CUDA memory fraction for a recommendation",
+    )
+    measurement.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print worker commands without launching them",
+    )
     parser.add_argument("--worker-batch-size", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--worker-output", type=Path, default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
+
+
+def _row_configuration(args: argparse.Namespace, batch_size: int) -> dict[str, Any]:
+    """Flat configuration fields included in every CSV/JSON result row."""
+    return {
+        "batch_size": int(batch_size),
+        "pool_size": int(args.pool_size),
+        "device": str(args.device),
+        "dtype": str(args.dtype),
+        "seed": int(args.seed),
+        "activation": str(args.activation),
+        "depth": int(args.depth),
+        "width": int(args.width),
+        "use_bias": bool(args.use_bias),
+        "warmup_updates": int(args.warmup_updates),
+        "measured_updates": int(args.measured_updates),
+    }
+
+
+def _public_configuration(args: argparse.Namespace) -> dict[str, Any]:
+    """Serializable public CLI configuration without private worker arguments."""
+    return {
+        "output_dir": Path(args.output_dir).resolve(),
+        "fixed_data_dir": Path(args.fixed_data_dir).resolve(),
+        "device": str(args.device),
+        "dtype": str(args.dtype),
+        "seed": int(args.seed),
+        "activation": str(args.activation),
+        "depth": int(args.depth),
+        "width": int(args.width),
+        "use_bias": bool(args.use_bias),
+        "pool_size": int(args.pool_size),
+        "batch_sizes": [int(value) for value in args.batch_sizes],
+        "warmup_updates": int(args.warmup_updates),
+        "measured_updates": int(args.measured_updates),
+        "memory_headroom_fraction": float(args.memory_headroom_fraction),
+        "dry_run": bool(args.dry_run),
+    }
+
+
+def _validate_controller_args(args: argparse.Namespace) -> None:
+    if args.depth <= 0 or args.width <= 0:
+        raise ValueError("network depth and width must be positive")
+    if args.pool_size <= 0 or args.pool_size % K_BUCKET_COUNT:
+        raise ValueError(f"pool size must be positive and divisible by {K_BUCKET_COUNT} K buckets")
+    invalid_batches = [
+        int(value)
+        for value in args.batch_sizes
+        if value <= 0 or value % K_BUCKET_COUNT or value > args.pool_size
+    ]
+    if invalid_batches:
+        raise ValueError(
+            "every batch size must be positive, divisible by "
+            f"{K_BUCKET_COUNT}, and no larger than pool size; invalid: {invalid_batches}"
+        )
+    if not 0.0 < args.memory_headroom_fraction <= 1.0:
+        raise ValueError("memory headroom fraction must be in (0, 1]")
+    if args.warmup_updates < 0 or args.measured_updates <= 0:
+        raise ValueError("warmup must be nonnegative and measured updates positive")
 
 
 def _worker(args: argparse.Namespace) -> int:
@@ -51,19 +189,18 @@ def _worker(args: argparse.Namespace) -> int:
         raise ValueError("worker output and batch size are required")
     batch_size = int(args.worker_batch_size)
     result: dict[str, Any] = {
-        "batch_size": batch_size,
-        "pool_size": int(args.pool_size),
+        **_row_configuration(args, batch_size),
         "status": "failed",
-        "device": args.device,
-        "dtype": args.dtype,
     }
     try:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
-        if batch_size % 4:
-            raise ValueError("batch size must be divisible by four K buckets")
-        if args.pool_size % 4 or batch_size > args.pool_size:
-            raise ValueError("pool size must be divisible by four and at least batch size")
+        if batch_size % K_BUCKET_COUNT:
+            raise ValueError(f"batch size must be divisible by {K_BUCKET_COUNT} K buckets")
+        if args.pool_size % K_BUCKET_COUNT or batch_size > args.pool_size:
+            raise ValueError(
+                f"pool size must be divisible by {K_BUCKET_COUNT} and at least batch size"
+            )
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         torch.cuda.set_device(torch.device(args.device))
@@ -176,7 +313,7 @@ def _recommend(rows: list[dict[str, Any]], headroom: float) -> dict[str, Any] | 
     if not feasible:
         return None
     selected = max(feasible, key=lambda row: (float(row["motions_per_second"]), int(row["batch_size"])))
-    return {
+    recommendation = {
         "recommended_batch_size": int(selected["batch_size"]),
         "pool_size": int(selected["pool_size"]),
         "expected_peak_reserved_gib": float(selected["peak_reserved_gib"]),
@@ -185,16 +322,24 @@ def _recommend(rows: list[dict[str, Any]], headroom: float) -> dict[str, Any] | 
         "memory_headroom_fraction": float(headroom),
         "selection_rule": "highest measured motions/s among runs below reserved-memory headroom",
     }
+    for key in ("device", "dtype", "seed", "activation", "depth", "width", "use_bias"):
+        if key in selected:
+            recommendation[key] = selected[key]
+    return recommendation
 
 
 def main() -> None:
     args = parse_args()
     if args.worker_batch_size is not None:
         raise SystemExit(_worker(args))
-    if not 0.0 < args.memory_headroom_fraction <= 1.0:
-        raise ValueError("memory headroom fraction must be in (0, 1]")
-    if args.warmup_updates < 0 or args.measured_updates <= 0:
-        raise ValueError("warmup must be nonnegative and measured updates positive")
+    _validate_controller_args(args)
+    configuration = _public_configuration(args)
+    print(
+        "probe configuration: "
+        f"activation={args.activation} depth={args.depth} width={args.width} "
+        f"use_bias={args.use_bias} pool_size={args.pool_size} "
+        f"batch_sizes={list(args.batch_sizes)}"
+    )
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
@@ -203,8 +348,11 @@ def main() -> None:
         command = _worker_command(args, batch_size, worker_output)
         print(" ".join(command))
         if args.dry_run:
-            rows.append({"batch_size": batch_size, "status": "planned"})
+            rows.append({**_row_configuration(args, batch_size), "status": "planned"})
             continue
+        # A hard-crashed worker must not be mistaken for a successful result
+        # left by an earlier sweep in the same output directory.
+        worker_output.unlink(missing_ok=True)
         completed = subprocess.run(command, text=True, capture_output=True)
         if completed.stdout:
             print(completed.stdout, end="")
@@ -215,18 +363,19 @@ def main() -> None:
         else:
             rows.append(
                 {
-                    "batch_size": batch_size,
+                    **_row_configuration(args, batch_size),
                     "status": "worker_crashed",
                     "return_code": completed.returncode,
                 }
             )
     _write_csv(output / "memory_probe.csv", rows)
-    write_json(output / "memory_probe.json", {"configuration": vars(args), "results": rows})
+    write_json(output / "memory_probe.json", {"configuration": configuration, "results": rows})
     recommendation = _recommend(rows, args.memory_headroom_fraction)
     write_json(
         output / "recommended_training_config.json",
         {
             "available": recommendation is not None,
+            "configuration": configuration,
             "recommendation": recommendation,
             "note": "Peak values include ask, forward, energy loss, backward, optimizer step, and pool tell/reset checks.",
         },
