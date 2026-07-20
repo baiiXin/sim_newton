@@ -246,3 +246,24 @@ python -m unittest -v \
 ```
 
 采样/网格测试只依赖 NumPy；物理和训练测试需要 PyTorch。项目默认 `float64`，建议先在目标 CUDA/PyTorch 环境运行测试和显存探测，再开始长训练。
+
+## 9. Newton VBD reference
+
+在已经安装 Newton/Warp 的 `cloth_opter` 环境运行 frozen typical motion 0：
+
+```bash
+conda run --no-capture-output -n cloth_opter python cloth14_vbd_reference.py
+```
+
+默认使用 `dt=0.01`、每步 10 次 VBD 迭代并运行 6000 个物理步；有 CUDA 时自动选择
+`cuda:0`，否则回退 CPU。VBD 自碰撞默认开启。稀疏轨迹、诊断、精确配置和与当前
+无碰撞 `float64` 模型的差异说明写入 `vbd_reference/`。
+
+渲染已有 VBD 轨迹：
+
+```bash
+conda run --no-capture-output -n cloth_opter python cloth15_render_vbd_reference.py
+```
+
+该脚本通过 Polyscope EGL 渲染并使用 H.264 编码 `vbd_reference/motion.mp4`，同时绘制
+已保存的速度与几何质量诊断。只有输入中确实存在 residual 字段时才会绘制 residual 曲线。
