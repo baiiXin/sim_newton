@@ -1,0 +1,16 @@
+name: cloth_opter
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=2.4.6
+  - matplotlib=3.9.1
+  - pillow=12.3.0
+  - ffmpeg=8.0.1
+
+# GPU PyTorch, Warp, Newton, Polyscope, and imageio-ffmpeg are installed
+# with pip after creating the environment. See README.md for the exact commands.
