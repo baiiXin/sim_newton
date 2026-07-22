@@ -7,7 +7,12 @@ import unittest
 import torch
 import torch.nn as nn
 
-from cloth16_gnn_model import GNNModelSpec, LearnedOptimizerGNN
+from cloth06_probe_memory_and_throughput import GNN_MESSAGE_PASSING_STEPS
+from cloth16_gnn_model import (
+    DEFAULT_MESSAGE_PASSING_STEPS,
+    GNNModelSpec,
+    LearnedOptimizerGNN,
+)
 
 
 class _FakePhysics:
@@ -57,6 +62,7 @@ class TShirtGNNTests(unittest.TestCase):
         self.assertEqual(spec.width, 128)
         self.assertEqual(spec.depth, 2)
         self.assertEqual(spec.message_passing_steps, 15)
+        self.assertEqual(GNN_MESSAGE_PASSING_STEPS, DEFAULT_MESSAGE_PASSING_STEPS)
         self.assertFalse(spec.use_bias)
         self.assertIs(self.model.edge_mlp, self.model.edge_mlp)
         self.assertIs(self.model.node_mlp, self.model.node_mlp)

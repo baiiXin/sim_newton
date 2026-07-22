@@ -1,54 +1,81 @@
-# T-shirt shared-weight GNN baseline
+# T-shirt 共享权重 GNN 基线
 
-This adds a parallel GNN baseline without deleting the existing dense MLP path.
-It reuses the current online randomized training pool, energy loss, frozen
-validation/test sets, failure checks, and single-motion evaluation protocol.
+本基线在保留现有 dense MLP 路径的同时，新增了一条并行的 GNN 路径。它复用当前的在线随机训练池、能量损失、冻结的验证集与测试集、失败检查，以及 single-motion 评估协议。
 
-## Architecture
+## 网络结构
 
-For every vertex, concatenate three world-space 3-vectors:
+对每个顶点，拼接三个世界坐标系下的三维向量：
 
-- current **raw** stationarity residual;
-- previous raw residual;
-- previous predicted displacement.
+- 当前的**原始**驻值残差；
+- 上一次的原始残差；
+- 上一次预测的位置增量。
 
-The resulting 9D feature is encoded by a two-layer `9 -> 128 -> 128` ReLU MLP.
-The model then performs 15 message-passing rounds with one shared edge MLP and
-one shared node-update MLP across all rounds:
+得到的 9 维特征由两层 `9 -> 128 -> 128` ReLU MLP 编码。随后模型执行 15 轮消息传递，所有轮次共享同一个边 MLP 和同一个节点更新 MLP：
 
-1. each undirected mesh edge creates two directed messages;
-2. a message uses `[receiver_hidden, sender_hidden]` and a shared
-   `256 -> 128 -> 128` ReLU MLP;
-3. incoming messages are summed at each vertex;
-4. the node update uses `[node_hidden, summed_message]` and a shared
-   `256 -> 128 -> 128` ReLU MLP;
-5. the node update is added through a residual connection.
+1. 每条无向网格边产生两条有向消息；
+2. 每条消息以 `[接收节点隐状态, 发送节点隐状态]` 为输入，经过共享的 `256 -> 128 -> 128` ReLU MLP；
+3. 每个顶点对收到的消息求和；
+4. 节点更新以 `[节点隐状态, 消息和]` 为输入，经过共享的 `256 -> 128 -> 128` ReLU MLP；
+5. 节点更新通过残差连接加回节点隐状态。
 
-The decoder is `128 -> 128 -> 3`, with ReLU only after the first linear layer.
-All linear layers have no bias. The node-update final layer and decoder final
-layer are zero initialized.
+解码器为 `128 -> 128 -> 3`，只在第一个线性层后使用 ReLU。所有线性层均不含 bias。节点更新 MLP 的最后一层和解码器的最后一层使用零初始化。
 
-This first baseline deliberately has:
+第一版基线有意保持简单，不包含：
 
-- no mass preconditioning of the residual;
-- no fixed-point indicator in the input;
-- no edge attributes;
-- no input normalization or output scale factor;
-- shared processor parameters for all 15 rounds.
+- 残差的质量预条件；
+- 输入中的固定点标记；
+- 边属性；
+- 输入归一化或输出缩放因子；
+- 15 轮消息传递各自独立的 processor 参数。
 
-Fixed vertices are still hard-gated to zero at the output and projected by the
-existing pipeline.
+固定顶点的输出仍会被硬门控为零，并由现有流程精确投影。
 
-## Unit test
+## 单元测试
+
+在 `cloth_tshirt/` 目录运行：
 
 ```bash
 python -m unittest -v test_tshirt_gnn.py
 ```
 
-## Train
+## 峰值显存测试
 
-Start with a small batch because 15 rounds retain edge and node activations for
-backpropagation:
+GNN 的 15 轮消息传递会在反向传播期间保留边和节点激活，不能使用 dense MLP 的显存结果估算训练 batch。开始长时间训练前，应在实际训练所用的 GPU、PyTorch 版本和 dtype 上扫描完整训练步的峰值显存：
+
+```bash
+python cloth06_probe_memory_and_throughput.py \
+  --model-type gnn \
+  --output-dir cloth_tshirt_gnn_pipeline/profiling/memory_probe \
+  --fixed-data-dir fixed_data \
+  --device cuda:0 \
+  --dtype float64 \
+  --seed 42 \
+  --activation relu \
+  --depth 2 \
+  --width 128 \
+  --no-use-bias \
+  --pool-size 512 \
+  --batch-sizes 4 8 16 32 \
+  --warmup-updates 1 \
+  --measured-updates 3 \
+  --memory-headroom-fraction 0.85
+```
+
+每个候选 batch 都在全新的子进程中运行，执行完整的 `ask -> residual/GNN -> energy -> backward -> Adam -> tell/reset checks`。预热结束后会重置 CUDA 峰值统计，再对测量阶段计时并记录：
+
+- `peak_allocated_gib`：PyTorch 张量实际占用的最大显存；
+- `peak_reserved_gib`：PyTorch CUDA 缓存分配器保留的最大显存；
+- `peak_allocated_fraction` / `peak_reserved_fraction`：上述数值占 GPU 总显存的比例；
+- `motions_per_second`：完整训练步的实测吞吐量；
+- `status`：`success`、`oom`、`failed` 或 `worker_crashed`。
+
+汇总结果写入 `memory_probe.json` 和 `memory_probe.csv`。只有 `peak_reserved_fraction <= 0.85` 的成功结果会参与推荐；其中吞吐量最高的 batch 写入 `recommended_training_config.json`。正式训练应使用其中的 `recommended_batch_size`，并保持 `model_type=gnn`、dtype、width、pool size 与测试一致。不同 GPU 上的峰值显存不同，因此文档不写死某个硬件的测量值。
+
+`--model-type gnn` 会强制检查本基线的 ReLU、depth 2、无 bias 和 15 轮消息传递配置，避免误用 dense MLP 的显存数据。若 batch 4 仍然 OOM，可先减小 `--pool-size` 以降低常驻训练池显存，或改用 `float32` 后重新测试；pool size 和每个 batch 都必须能被 4 个 K buckets 整除。
+
+## 训练
+
+15 轮消息传递会为反向传播保留大量边和节点激活，因此应从峰值显存测试推荐的小 batch 开始。以下示例使用 batch 4：
 
 ```bash
 python cloth17_train_gnn_online.py \
@@ -59,11 +86,9 @@ python cloth17_train_gnn_online.py \
   --max-wall-hours 10
 ```
 
-The default output root is `cloth_tshirt_gnn_pipeline/`, and the default run
-name records raw residual input, 15 shared message-passing rounds, width 128,
-two-layer MLPs, and no bias.
+默认输出根目录为 `cloth_tshirt_gnn_pipeline/`。默认实验名会记录原始残差输入、15 轮共享权重消息传递、宽度 128、两层 MLP 和无 bias 配置。
 
-## Full frozen validation/test
+## 完整冻结验证与测试
 
 ```bash
 python cloth18_evaluate_gnn_checkpoint.py \
@@ -72,7 +97,7 @@ python cloth18_evaluate_gnn_checkpoint.py \
   --inner-steps 50
 ```
 
-## Single-motion network rollout
+## Single-motion 网络 rollout
 
 ```bash
 python cloth19_rollout_gnn_single_motion.py \

@@ -95,6 +95,7 @@ python cloth06_probe_memory_and_throughput.py \
   --device cuda:0 \
   --dtype float64 \
   --seed 42 \
+  --model-type mlp \
   --activation relu \
   --depth 1 \
   --width 2048 \
@@ -110,6 +111,7 @@ python cloth06_probe_memory_and_throughput.py \
 
 | 参数 | 默认值 | 含义与约束 |
 |---|---:|---|
+| `--model-type` | `mlp` | 待测试的网络类型，可选 `mlp/gnn`；GNN 基线固定使用 ReLU、depth 2、无 bias 和 15 轮消息传递 |
 | `--activation` | `relu` | 隐藏层激活，可选 `identity/relu/gelu/silu/tanh` |
 | `--depth` | `1` | 隐藏线性层数量，必须为正整数 |
 | `--width` | `2048` | 每个隐藏层的宽度，必须为正整数 |
@@ -119,7 +121,7 @@ python cloth06_probe_memory_and_throughput.py \
 
 每个候选 batch size 都在独立子进程中，用完全相同的网络和 pool 配置执行完整的 `ask → residual/model → energy → backward → Adam → tell/reset checks`。`--warmup-updates` 不计时，随后用 `--measured-updates` 统计吞吐和峰值；只有 `peak_reserved / total_memory <= memory_headroom_fraction` 的结果才参与推荐。
 
-完整 CLI 配置会打印到终端，并写入 `memory_probe.json` 和 `recommended_training_config.json` 的 `configuration` 字段；`memory_probe.json`/`memory_probe.csv` 的每个结果也会重复记录网络规格、pool size 和该次实际 batch size。推荐文件按显存阈值内 `motions_per_second` 最高的结果给出 `recommended_batch_size`，并一并保存网络宽度、深度、激活、bias 和 pool size，便于确认显存测试与正式训练完全一致。
+完整 CLI 配置会打印到终端，并写入 `memory_probe.json` 和 `recommended_training_config.json` 的 `configuration` 字段；`memory_probe.json`/`memory_probe.csv` 的每个结果也会重复记录网络规格、pool size 和该次实际 batch size。推荐文件按显存阈值内 `motions_per_second` 最高的结果给出 `recommended_batch_size`，并一并保存网络类型、宽度、深度、激活、bias、消息传递轮数和 pool size，便于确认显存测试与正式训练完全一致。
 
 ## 3. 在线训练
 

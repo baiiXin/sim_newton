@@ -1,4 +1,4 @@
-"""Probe peak CUDA memory for a complete T-shirt training step in fresh processes."""
+"""Probe peak CUDA memory for a complete MLP or GNN T-shirt training step."""
 from __future__ import annotations
 
 import argparse
@@ -17,8 +17,10 @@ from tshirt_config import DEFAULT_FIXED_DATA_DIR, DEFAULT_TRAIN_SEED, write_json
 DEFAULT_OUTPUT = Path("cloth_tshirt_pipeline/profiling/memory_probe")
 GIB = 1024 ** 3
 SUPPORTED_ACTIVATIONS = ("identity", "relu", "gelu", "silu", "tanh")
+SUPPORTED_MODEL_TYPES = ("mlp", "gnn")
 DEFAULT_BATCH_SIZES = (4, 8, 16, 32, 64, 128)
 K_BUCKET_COUNT = 4
+GNN_MESSAGE_PASSING_STEPS = 15
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +58,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     network = parser.add_argument_group("network")
+    network.add_argument(
+        "--model-type",
+        choices=SUPPORTED_MODEL_TYPES,
+        default="mlp",
+        help="learned-optimizer architecture to instantiate in every worker",
+    )
     network.add_argument(
         "--activation",
         choices=SUPPORTED_ACTIVATIONS,
@@ -127,10 +135,14 @@ def _row_configuration(args: argparse.Namespace, batch_size: int) -> dict[str, A
         "device": str(args.device),
         "dtype": str(args.dtype),
         "seed": int(args.seed),
+        "model_type": str(args.model_type),
         "activation": str(args.activation),
         "depth": int(args.depth),
         "width": int(args.width),
         "use_bias": bool(args.use_bias),
+        "message_passing_steps": (
+            GNN_MESSAGE_PASSING_STEPS if args.model_type == "gnn" else None
+        ),
         "warmup_updates": int(args.warmup_updates),
         "measured_updates": int(args.measured_updates),
     }
@@ -144,10 +156,14 @@ def _public_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "device": str(args.device),
         "dtype": str(args.dtype),
         "seed": int(args.seed),
+        "model_type": str(args.model_type),
         "activation": str(args.activation),
         "depth": int(args.depth),
         "width": int(args.width),
         "use_bias": bool(args.use_bias),
+        "message_passing_steps": (
+            GNN_MESSAGE_PASSING_STEPS if args.model_type == "gnn" else None
+        ),
         "pool_size": int(args.pool_size),
         "batch_sizes": [int(value) for value in args.batch_sizes],
         "warmup_updates": int(args.warmup_updates),
@@ -160,6 +176,11 @@ def _public_configuration(args: argparse.Namespace) -> dict[str, Any]:
 def _validate_controller_args(args: argparse.Namespace) -> None:
     if args.depth <= 0 or args.width <= 0:
         raise ValueError("network depth and width must be positive")
+    if args.model_type == "gnn":
+        if args.activation != "relu" or args.depth != 2 or args.use_bias:
+            raise ValueError(
+                "the GNN baseline requires --activation relu --depth 2 --no-use-bias"
+            )
     if args.pool_size <= 0 or args.pool_size % K_BUCKET_COUNT:
         raise ValueError(f"pool size must be positive and divisible by {K_BUCKET_COUNT} K buckets")
     invalid_batches = [
@@ -183,7 +204,7 @@ def _worker(args: argparse.Namespace) -> int:
     import torch
 
     from cloth02_batched_physics import load_physics
-    from cloth03_training_pool import LearnedOptimizerMLP, ModelSpec, OnlineTrainingPool, training_step
+    from cloth03_training_pool import OnlineTrainingPool, training_step
 
     if args.worker_output is None or args.worker_batch_size is None:
         raise ValueError("worker output and batch size are required")
@@ -208,10 +229,22 @@ def _worker(args: argparse.Namespace) -> int:
         physics = load_physics(
             fixed_data_dir=args.fixed_data_dir, device=args.device, dtype=dtype
         )
-        model = LearnedOptimizerMLP(
-            physics=physics,
-            model_spec=ModelSpec(args.activation, args.depth, args.width, args.use_bias),
-        )
+        if args.model_type == "gnn":
+            from cloth16_gnn_model import GNNModelSpec, LearnedOptimizerGNN
+
+            model_spec = GNNModelSpec(
+                activation=args.activation,
+                depth=args.depth,
+                width=args.width,
+                use_bias=args.use_bias,
+                message_passing_steps=GNN_MESSAGE_PASSING_STEPS,
+            )
+            model = LearnedOptimizerGNN(physics=physics, model_spec=model_spec)
+        else:
+            from cloth03_training_pool import LearnedOptimizerMLP, ModelSpec
+
+            model_spec = ModelSpec(args.activation, args.depth, args.width, args.use_bias)
+            model = LearnedOptimizerMLP(physics=physics, model_spec=model_spec)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         pool = OnlineTrainingPool(
             physics=physics,
@@ -285,6 +318,7 @@ def _worker_command(args: argparse.Namespace, batch_size: int, output: Path) -> 
         "--device", args.device,
         "--dtype", args.dtype,
         "--seed", str(args.seed),
+        "--model-type", args.model_type,
         "--activation", args.activation,
         "--depth", str(args.depth),
         "--width", str(args.width),
@@ -322,7 +356,10 @@ def _recommend(rows: list[dict[str, Any]], headroom: float) -> dict[str, Any] | 
         "memory_headroom_fraction": float(headroom),
         "selection_rule": "highest measured motions/s among runs below reserved-memory headroom",
     }
-    for key in ("device", "dtype", "seed", "activation", "depth", "width", "use_bias"):
+    for key in (
+        "device", "dtype", "seed", "model_type", "activation", "depth", "width",
+        "use_bias", "message_passing_steps",
+    ):
         if key in selected:
             recommendation[key] = selected[key]
     return recommendation
@@ -336,7 +373,8 @@ def main() -> None:
     configuration = _public_configuration(args)
     print(
         "probe configuration: "
-        f"activation={args.activation} depth={args.depth} width={args.width} "
+        f"model_type={args.model_type} activation={args.activation} "
+        f"depth={args.depth} width={args.width} "
         f"use_bias={args.use_bias} pool_size={args.pool_size} "
         f"batch_sizes={list(args.batch_sizes)}"
     )

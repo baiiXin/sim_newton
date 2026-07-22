@@ -113,6 +113,7 @@ cloth_15x15_500step_pipeline/
 cloth_15x15_scale_up_pipeline/
 cloth_5x5_scale_up_pipeline/
 cloth_tshirt_pipeline/
+cloth_tshirt_gnn_pipeline/
 
 # T-shirt fixed evaluation initial states are intentional, reproducible test
 # fixtures.  Training motions remain online-only and are never written here.

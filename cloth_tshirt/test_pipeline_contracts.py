@@ -53,6 +53,41 @@ class PipelineContractTests(unittest.TestCase):
         self.assertTrue(row["use_bias"])
         self.assertEqual(row["pool_size"], 64)
         self.assertEqual(row["batch_size"], 8)
+        self.assertEqual(row["model_type"], "mlp")
+        self.assertIsNone(row["message_passing_steps"])
+
+    def test_memory_probe_exposes_gnn_peak_memory_configuration(self) -> None:
+        argv = [
+            "cloth06_probe_memory_and_throughput.py",
+            "--model-type", "gnn",
+            "--activation", "relu",
+            "--depth", "2",
+            "--width", "128",
+            "--no-use-bias",
+            "--pool-size", "64",
+            "--batch-sizes", "4", "8",
+        ]
+        with patch("sys.argv", argv):
+            args = parse_memory_probe_args()
+        _validate_controller_args(args)
+        row = _row_configuration(args, batch_size=4)
+        self.assertEqual(row["model_type"], "gnn")
+        self.assertEqual(row["message_passing_steps"], 15)
+        self.assertEqual(row["width"], 128)
+
+    def test_memory_probe_rejects_nonbaseline_gnn_shape(self) -> None:
+        argv = [
+            "cloth06_probe_memory_and_throughput.py",
+            "--model-type", "gnn",
+            "--activation", "relu",
+            "--depth", "1",
+            "--width", "128",
+            "--no-use-bias",
+        ]
+        with patch("sys.argv", argv):
+            args = parse_memory_probe_args()
+        with self.assertRaisesRegex(ValueError, "GNN baseline requires"):
+            _validate_controller_args(args)
 
     def test_memory_recommendation_preserves_training_shape(self) -> None:
         row = {
@@ -62,10 +97,12 @@ class PipelineContractTests(unittest.TestCase):
             "device": "cuda:0",
             "dtype": "float64",
             "seed": 7,
-            "activation": "gelu",
-            "depth": 3,
-            "width": 512,
+            "model_type": "gnn",
+            "activation": "relu",
+            "depth": 2,
+            "width": 128,
             "use_bias": False,
+            "message_passing_steps": 15,
             "peak_reserved_fraction": 0.5,
             "peak_reserved_gib": 12.0,
             "motions_per_second": 20.0,
@@ -73,7 +110,10 @@ class PipelineContractTests(unittest.TestCase):
         recommendation = _recommend([row], headroom=0.85)
         self.assertIsNotNone(recommendation)
         assert recommendation is not None
-        for key in ("activation", "depth", "width", "use_bias", "pool_size"):
+        for key in (
+            "model_type", "activation", "depth", "width", "use_bias", "pool_size",
+            "message_passing_steps",
+        ):
             self.assertEqual(recommendation[key], row[key])
         self.assertEqual(recommendation["recommended_batch_size"], row["batch_size"])
 
