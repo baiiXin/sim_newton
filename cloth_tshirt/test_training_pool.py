@@ -94,6 +94,35 @@ class TrainingPoolTests(unittest.TestCase):
         self.assertEqual(int(result.curves["inner_steps"][0]), 3)
         self.assertTrue(result.summary["fixed_inner_iteration_budget"])
 
+    def test_network_line_search_safely_rejects_zero_direction(self) -> None:
+        rest = self.physics.rest_positions.unsqueeze(0)
+        motion = FrozenMotionBatch(
+            motion_ids=("line_search_zero_direction",),
+            positions=rest,
+            velocities=torch.zeros_like(rest),
+            seeds=torch.tensor((0,), dtype=torch.long),
+        )
+        model = LearnedOptimizerMLP(
+            physics=self.physics,
+            model_spec=ModelSpec(activation="relu", depth=1, width=16, use_bias=False),
+        )
+        result = run_solver_rollout(
+            solver="network",
+            physics=self.physics,
+            motion=motion,
+            model=model,
+            settings=SingleMotionSettings(
+                rollout_frames=1,
+                inner_steps=3,
+                network_line_search=True,
+                trajectory_stride=1,
+            ),
+        )
+        self.assertEqual(result.summary["line_search_accepted_step_count"], 0)
+        self.assertEqual(result.summary["line_search_rejected_step_count"], 3)
+        self.assertEqual(int(result.curves["inner_steps"][0]), 3)
+        self.assertFalse(result.summary["failed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,12 +37,17 @@ class SingleMotionSettings:
     line_search_max_trials: int = 12
     line_search_reduction: float = 0.5
     armijo_c1: float = 1e-4
+    network_line_search: bool = False
     trajectory_stride: int = 5
     early_stop: bool = False
 
     def __post_init__(self) -> None:
         if not 1 <= self.line_search_max_trials <= 12:
             raise ValueError("line_search_max_trials must be in [1, 12]")
+        if not 0.0 < self.line_search_reduction < 1.0:
+            raise ValueError("line_search_reduction must be in (0, 1)")
+        if not 0.0 < self.armijo_c1 < 1.0:
+            raise ValueError("armijo_c1 must be in (0, 1)")
 
 
 @dataclass
@@ -78,6 +83,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mass-ls-step-size", type=float, default=1.0)
     parser.add_argument("--block-ls-step-size", type=float, default=1.0)
     parser.add_argument("--line-search-max-trials", type=int, default=12)
+    parser.add_argument("--line-search-reduction", type=float, default=0.5)
+    parser.add_argument("--armijo-c1", type=float, default=1e-4)
+    parser.add_argument(
+        "--network-line-search",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="apply Armijo backtracking to learned network updates",
+    )
     parser.add_argument("--trajectory-stride", type=int, default=5)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -202,6 +215,10 @@ def run_solver_rollout(
     curves["objective_evaluations"] = np.zeros(frames, dtype=np.int64)
     curves["converged"] = np.zeros(frames, dtype=np.bool_)
     curves["line_search_accepted_steps"] = np.zeros(frames, dtype=np.int64)
+    curves["line_search_rejected_steps"] = np.zeros(frames, dtype=np.int64)
+    curves["line_search_trials"] = np.zeros(frames, dtype=np.int64)
+    curves["line_search_alpha_mean"] = np.full(frames, np.nan, dtype=np.float64)
+    curves["line_search_alpha_min"] = np.full(frames, np.nan, dtype=np.float64)
 
     p = motion.positions.detach().clone()
     v = motion.velocities.detach().clone()
@@ -231,6 +248,9 @@ def run_solver_rollout(
         steps = 0
         evaluations = 0
         accepted_steps = 0
+        rejected_steps = 0
+        line_search_trials = 0
+        accepted_alphas: list[float] = []
         invalid_update = False
         current_norm = initial
         for inner in range(settings.inner_steps):
@@ -239,7 +259,7 @@ def run_solver_rollout(
             if solver == "network":
                 assert model is not None
                 with torch.no_grad():
-                    candidate, delta, current = apply_model_update(
+                    raw_candidate, raw_delta, current = apply_model_update(
                         model,
                         y,
                         q,
@@ -247,13 +267,44 @@ def run_solver_rollout(
                         previous_residual=previous_residual,
                         previous_update=previous_update,
                     )
-                valid = bool(torch.isfinite(candidate).all())
-                # One residual inside the model input and one after the update.
-                evaluations += 2
+                if settings.network_line_search:
+                    # `current` is the mass-preconditioned stationarity
+                    # residual. Undo that diagonal preconditioner to recover
+                    # the exact energy gradient without evaluating it twice.
+                    gradient = current.reshape_as(y) * (
+                        physics.vertex_masses.view(1, -1, 1)
+                        / (physics.dt * physics.dt)
+                    )
+                    candidate, accepted, alpha, trials = _line_search_step(
+                        physics=physics,
+                        y=y,
+                        q=q,
+                        fixed_targets=fixed_targets,
+                        gradient=gradient,
+                        direction=-raw_delta.reshape_as(y),
+                        initial_step=1.0,
+                        settings=settings,
+                    )
+                    delta = raw_delta * alpha if accepted else torch.zeros_like(raw_delta)
+                    valid = bool(torch.isfinite(candidate).all())
+                    line_search_trials += trials
+                    if accepted:
+                        accepted_alphas.append(alpha)
+                    else:
+                        rejected_steps += 1
+                    # Model residual + current energy + candidate energies +
+                    # post-step residual.
+                    evaluations += 3 + trials
+                else:
+                    candidate, delta = raw_candidate, raw_delta
+                    accepted = bool(torch.isfinite(candidate).all())
+                    valid = accepted
+                    # One residual inside the model input and one after the update.
+                    evaluations += 2
                 if valid:
                     y = candidate
                     previous_residual, previous_update = current, delta
-                    accepted_steps += 1
+                    accepted_steps += int(accepted)
                 else:
                     invalid_update = True
             else:
@@ -298,6 +349,11 @@ def run_solver_rollout(
         curves["objective_evaluations"][frame] = evaluations
         curves["converged"][frame] = float(final.item()) <= target
         curves["line_search_accepted_steps"][frame] = accepted_steps
+        curves["line_search_rejected_steps"][frame] = rejected_steps
+        curves["line_search_trials"][frame] = line_search_trials
+        if accepted_alphas:
+            curves["line_search_alpha_mean"][frame] = float(np.mean(accepted_alphas))
+            curves["line_search_alpha_min"][frame] = float(np.min(accepted_alphas))
         curves["displacement_rms"][frame] = float(
             torch.sqrt(torch.mean(torch.sum((y - start_positions) ** 2, dim=-1))).item()
         )
@@ -332,6 +388,10 @@ def run_solver_rollout(
         "inner_steps_cap": settings.inner_steps,
         "early_stop": settings.early_stop,
         "fixed_inner_iteration_budget": not settings.early_stop,
+        "network_line_search": settings.network_line_search,
+        "line_search_max_trials": settings.line_search_max_trials,
+        "line_search_reduction": settings.line_search_reduction,
+        "armijo_c1": settings.armijo_c1,
         "residual_ratio_tolerance": settings.residual_ratio_tolerance,
         "residual_ratio_median": float(np.nanmedian(curves["residual_ratio"])) if evaluated else math.inf,
         "residual_ratio_p95": float(np.nanquantile(curves["residual_ratio"], 0.95)) if evaluated else math.inf,
@@ -342,6 +402,12 @@ def run_solver_rollout(
         "single_step_le_two_orders_frame_count": int(slow.sum()),
         "single_step_le_two_orders_frame_fraction": float(slow.sum() / max(evaluated, 1)),
         "energy_increase_fraction": float(energy_increase.sum() / max(evaluated, 1)),
+        "line_search_accepted_step_count": int(
+            curves["line_search_accepted_steps"].sum()
+        ),
+        "line_search_rejected_step_count": int(
+            curves["line_search_rejected_steps"].sum()
+        ),
         "min_area_ratio": float(np.nanmin(curves["area_min"])) if evaluated else 0.0,
         "max_area_ratio": float(np.nanmax(curves["area_max"])) if evaluated else math.inf,
         "min_edge_ratio": float(np.nanmin(curves["edge_min"])) if evaluated else 0.0,
@@ -402,6 +468,10 @@ def main() -> None:
     args = parse_args()
     if args.line_search_max_trials < 1 or args.line_search_max_trials > 12:
         raise ValueError("--line-search-max-trials must be in [1, 12]")
+    if not 0.0 < args.line_search_reduction < 1.0:
+        raise ValueError("--line-search-reduction must be in (0, 1)")
+    if not 0.0 < args.armijo_c1 < 1.0:
+        raise ValueError("--armijo-c1 must be in (0, 1)")
     if args.inner_steps <= 0 or args.rollout_frames <= 0 or args.trajectory_stride <= 0:
         raise ValueError("rollout frames, inner steps, and trajectory stride must be positive")
     dtype = torch.float64 if args.dtype == "float64" else torch.float32
@@ -422,6 +492,9 @@ def main() -> None:
         mass_ls_step_size=args.mass_ls_step_size,
         block_ls_step_size=args.block_ls_step_size,
         line_search_max_trials=args.line_search_max_trials,
+        line_search_reduction=args.line_search_reduction,
+        armijo_c1=args.armijo_c1,
+        network_line_search=args.network_line_search,
         trajectory_stride=args.trajectory_stride,
         # Single-motion evaluation is a fixed-budget protocol.  Threshold-based
         # early stopping is available only in cloth13_inference.py.

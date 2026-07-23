@@ -155,6 +155,47 @@ def plot_diagnostics(
     figure.savefig(path, dpi=160)
     plt.close(figure)
     outputs.append(path)
+
+    if (
+        "line_search_alpha_mean" in curves
+        and bool(np.isfinite(curves["line_search_alpha_mean"]).any())
+    ):
+        figure, axes = plt.subplots(3, 1, figsize=(10, 9.5), sharex=True)
+        axes[0].plot(
+            frames,
+            curves["line_search_accepted_steps"],
+            label="accepted",
+            color="#2ca02c",
+        )
+        axes[0].plot(
+            frames,
+            curves["line_search_rejected_steps"],
+            label="rejected",
+            color="#d62728",
+        )
+        axes[1].plot(
+            frames,
+            curves["line_search_trials"],
+            label="candidate energy evaluations",
+            color="#9467bd",
+        )
+        for name, label in (
+            ("line_search_alpha_mean", "mean accepted alpha"),
+            ("line_search_alpha_min", "minimum accepted alpha"),
+        ):
+            valid = _finite_positive(curves[name])
+            axes[2].semilogy(frames[valid], curves[name][valid], label=label)
+        axes[0].set(ylabel="inner steps", title="Network Armijo line search")
+        axes[1].set(ylabel="trials")
+        axes[2].set(xlabel="physical frame", ylabel="accepted alpha")
+        for axis in axes:
+            axis.grid(True, which="both", alpha=0.25)
+            axis.legend()
+        path = output_dir / "05_line_search.png"
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
+        outputs.append(path)
     return outputs
 
 
@@ -225,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     for path in (curves_path, trajectory_path, metrics_path):
         if not path.is_file():
             raise FileNotFoundError(f"single-motion result is missing: {path}")
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
 
     render_manifest_path = rollout_dir / "render_manifest.json"
     expected = (
@@ -233,6 +275,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         rollout_dir / "figures" / "03_geometry_ratios.png",
         rollout_dir / "figures" / "04_trajectory_keyframes.png",
     )
+    if bool(metrics.get("network_line_search", False)):
+        expected = (*expected, rollout_dir / "figures" / "05_line_search.png")
     if not args.skip_video:
         expected = (
             *expected,
@@ -252,7 +296,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     if mesh.sha256 != model.mesh_sha256:
         raise ValueError("rendering OBJ hash differs from the fixed model")
     curves = _load_curves(curves_path)
-    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     with np.load(trajectory_path, allow_pickle=False) as trajectory:
         all_physical_frames = trajectory["frames"].astype(np.int64)
         all_positions = trajectory["positions"].astype(np.float32)

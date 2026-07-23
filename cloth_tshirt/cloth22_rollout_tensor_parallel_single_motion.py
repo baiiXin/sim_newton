@@ -42,6 +42,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--residual-ratio-tolerance", type=float, default=1e-3)
     parser.add_argument("--trajectory-stride", type=int, default=5)
     parser.add_argument(
+        "--network-line-search",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="apply Armijo backtracking to every learned network update",
+    )
+    parser.add_argument("--line-search-max-trials", type=int, default=12)
+    parser.add_argument("--line-search-reduction", type=float, default=0.5)
+    parser.add_argument("--armijo-c1", type=float, default=1e-4)
+    parser.add_argument(
         "--visualize",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -90,6 +99,12 @@ def validate_args(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
         raise ValueError("--motion-index must be nonnegative")
     if args.rollout_frames <= 0 or args.inner_steps <= 0 or args.trajectory_stride <= 0:
         raise ValueError("rollout frames, inner steps, and trajectory stride must be positive")
+    if not 1 <= args.line_search_max_trials <= 12:
+        raise ValueError("--line-search-max-trials must be in [1, 12]")
+    if not 0.0 < args.line_search_reduction < 1.0:
+        raise ValueError("--line-search-reduction must be in (0, 1)")
+    if not 0.0 < args.armijo_c1 < 1.0:
+        raise ValueError("--armijo-c1 must be in (0, 1)")
     if args.render_fps <= 0 or args.render_frame_stride <= 0:
         raise ValueError("render FPS and frame stride must be positive")
     if args.render_width <= 0 or args.render_height <= 0:
@@ -116,7 +131,12 @@ def _forwarded_arguments(args: argparse.Namespace) -> list[str]:
         "--inner-steps", str(args.inner_steps),
         "--residual-ratio-tolerance", str(args.residual_ratio_tolerance),
         "--trajectory-stride", str(args.trajectory_stride),
+        "--line-search-max-trials", str(args.line_search_max_trials),
+        "--line-search-reduction", str(args.line_search_reduction),
+        "--armijo-c1", str(args.armijo_c1),
     ]
+    if args.network_line_search:
+        output.append("--network-line-search")
     if args.overwrite:
         output.append("--overwrite")
     return output
@@ -238,6 +258,10 @@ def _worker(args: argparse.Namespace, manifest: dict[str, Any]) -> int:
             rollout_frames=args.rollout_frames,
             inner_steps=args.inner_steps,
             residual_ratio_tolerance=args.residual_ratio_tolerance,
+            line_search_max_trials=args.line_search_max_trials,
+            line_search_reduction=args.line_search_reduction,
+            armijo_c1=args.armijo_c1,
+            network_line_search=args.network_line_search,
             trajectory_stride=args.trajectory_stride,
             early_stop=False,
         )
@@ -326,7 +350,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"checkpoint_update={manifest['update_count']} "
         f"width={manifest['model_spec']['width']} "
         f"motion={args.split}[{args.motion_index}] "
-        f"frames={args.rollout_frames} inner_steps={args.inner_steps}",
+        f"frames={args.rollout_frames} inner_steps={args.inner_steps} "
+        f"network_line_search={args.network_line_search}",
         flush=True,
     )
     print(" ".join(command), flush=True)
