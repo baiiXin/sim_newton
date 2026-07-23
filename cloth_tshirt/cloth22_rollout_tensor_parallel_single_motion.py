@@ -41,6 +41,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--inner-steps", type=int, default=50)
     parser.add_argument("--residual-ratio-tolerance", type=float, default=1e-3)
     parser.add_argument("--trajectory-stride", type=int, default=5)
+    parser.add_argument(
+        "--visualize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="plot diagnostics and render an MP4 after the distributed rollout",
+    )
+    parser.add_argument("--render-fps", type=int, default=30)
+    parser.add_argument("--render-frame-stride", type=int, default=1)
+    parser.add_argument("--render-width", type=int, default=1280)
+    parser.add_argument("--render-height", type=int, default=720)
+    parser.add_argument("--video-crf", type=int, default=18)
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="auto-detect from DISPLAY; headless Linux uses Polyscope EGL",
+    )
+    parser.add_argument("--egl-device-index", type=int, default=-1)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -72,6 +90,12 @@ def validate_args(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
         raise ValueError("--motion-index must be nonnegative")
     if args.rollout_frames <= 0 or args.inner_steps <= 0 or args.trajectory_stride <= 0:
         raise ValueError("rollout frames, inner steps, and trajectory stride must be positive")
+    if args.render_fps <= 0 or args.render_frame_stride <= 0:
+        raise ValueError("render FPS and frame stride must be positive")
+    if args.render_width <= 0 or args.render_height <= 0:
+        raise ValueError("render width and height must be positive")
+    if not 0 <= args.video_crf <= 51:
+        raise ValueError("--video-crf must be in [0, 51]")
     if manifest.get("dtype") != args.dtype:
         raise ValueError(
             f"checkpoint dtype {manifest.get('dtype')!r} does not match --dtype {args.dtype!r}"
@@ -109,6 +133,26 @@ def worker_command(args: argparse.Namespace) -> list[str]:
         "--worker",
         *_forwarded_arguments(args),
     ]
+
+
+def visualization_command(args: argparse.Namespace) -> list[str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().parent / "cloth23_render_single_motion_rollout.py"),
+        "--rollout-dir", str(args.output_dir.resolve()),
+        "--fixed-data-dir", str(args.fixed_data_dir.resolve()),
+        "--fps", str(args.render_fps),
+        "--frame-stride", str(args.render_frame_stride),
+        "--width", str(args.render_width),
+        "--height", str(args.render_height),
+        "--video-crf", str(args.video_crf),
+        "--egl-device-index", str(args.egl_device_index),
+    ]
+    if args.headless is not None:
+        command.append("--headless" if args.headless else "--no-headless")
+    if args.overwrite:
+        command.append("--overwrite")
+    return command
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -286,12 +330,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         flush=True,
     )
     print(" ".join(command), flush=True)
+    if args.visualize:
+        print(" ".join(visualization_command(args)), flush=True)
     if args.dry_run:
         return
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = ",".join(str(value) for value in args.devices)
     environment.setdefault("PYTHONUNBUFFERED", "1")
     completed = subprocess.run(command, env=environment)
+    if completed.returncode == 0 and args.visualize:
+        completed = subprocess.run(visualization_command(args), env=environment)
     raise SystemExit(completed.returncode)
 
 
