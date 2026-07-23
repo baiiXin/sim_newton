@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -8,6 +10,21 @@ from cloth06_probe_memory_and_throughput import (
     _row_configuration,
     _validate_controller_args,
     parse_args as parse_memory_probe_args,
+)
+from cloth20_probe_dual_gpu_tensor_parallel import (
+    _validate_args as validate_tensor_parallel_probe_args,
+    _worker_command as tensor_parallel_worker_command,
+    network_dimensions as tensor_parallel_network_dimensions,
+    parse_args as parse_tensor_parallel_probe_args,
+)
+from cloth21_train_tensor_parallel_online import (
+    next_checkpoint_generation,
+    parse_args as parse_tensor_parallel_train_args,
+    prune_full_checkpoints,
+    resolve_resume_checkpoint,
+    run_directory as tensor_parallel_run_directory,
+    validate_args as validate_tensor_parallel_train_args,
+    worker_command as tensor_parallel_train_worker_command,
 )
 from tshirt_config import DEFAULT_EVALUATION
 from validation_protocol import CHECKPOINT_VALIDATION, FAST_MONITOR, checkpoint_rank
@@ -116,6 +133,92 @@ class PipelineContractTests(unittest.TestCase):
         ):
             self.assertEqual(recommendation[key], row[key])
         self.assertEqual(recommendation["recommended_batch_size"], row["batch_size"])
+
+    def test_tensor_parallel_probe_defaults_to_width_above_input(self) -> None:
+        with patch(
+            "sys.argv", ["cloth20_probe_dual_gpu_tensor_parallel.py", "--dry-run"]
+        ):
+            args = parse_tensor_parallel_probe_args()
+        dimensions = tensor_parallel_network_dimensions(num_vertices=4424, width=args.width)
+        validate_tensor_parallel_probe_args(args, num_vertices=4424)
+        self.assertEqual(dimensions["input_dim"], 39816)
+        self.assertEqual(dimensions["width"], 39936)
+        self.assertGreater(dimensions["width_to_input_ratio"], 1.0)
+        self.assertEqual(dimensions["global_parameter_count"], 2_120_122_368)
+        self.assertEqual(dimensions["local_parameter_count"], 1_060_061_184)
+        self.assertEqual(args.pool_size, 512)
+        self.assertEqual(args.batch_size, 32)
+        command = tensor_parallel_worker_command(args)
+        self.assertIn("torch.distributed.run", command)
+        self.assertIn("--nproc-per-node=2", command)
+
+    def test_tensor_parallel_probe_rejects_bias(self) -> None:
+        with patch(
+            "sys.argv",
+            ["cloth20_probe_dual_gpu_tensor_parallel.py", "--use-bias", "--dry-run"],
+        ):
+            args = parse_tensor_parallel_probe_args()
+        with self.assertRaisesRegex(ValueError, "no-use-bias"):
+            validate_tensor_parallel_probe_args(args, num_vertices=4424)
+
+    def test_tensor_parallel_trainer_defaults_to_measured_configuration(self) -> None:
+        args = parse_tensor_parallel_train_args(["--dry-run"])
+        validate_tensor_parallel_train_args(args, num_vertices=4424)
+        self.assertEqual(args.width, 39936)
+        self.assertEqual(args.pool_size, 512)
+        self.assertEqual(args.batch_size, 32)
+        self.assertEqual(args.dtype, "float32")
+        self.assertFalse(args.use_bias)
+        command = tensor_parallel_train_worker_command(args)
+        self.assertIn("torch.distributed.run", command)
+        self.assertIn("--nproc-per-node=2", command)
+        self.assertIn("--worker", command)
+        self.assertIn("width_39936_no_bias", str(tensor_parallel_run_directory(args)))
+
+    def test_tensor_parallel_trainer_forwards_resume_and_run_directory(self) -> None:
+        args = parse_tensor_parallel_train_args(
+            ["--run-dir", "/tmp/tp-contract-run", "--resume", "--dry-run"]
+        )
+        validate_tensor_parallel_train_args(args, num_vertices=4424)
+        command = tensor_parallel_train_worker_command(args)
+        self.assertIn("--resume", command)
+        self.assertEqual(
+            command[command.index("--run-dir") + 1],
+            str(Path("/tmp/tp-contract-run").resolve()),
+        )
+
+    def test_resume_pointer_rejects_incomplete_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            checkpoint = run_dir / "checkpoints" / "step_000000100_gen_000000"
+            checkpoint.mkdir(parents=True)
+            (run_dir / "latest.json").write_text(
+                '{"checkpoint":"checkpoints/step_000000100_gen_000000"}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(FileNotFoundError, "incomplete"):
+                resolve_resume_checkpoint(run_dir)
+            (checkpoint / "COMPLETE").touch()
+            self.assertEqual(resolve_resume_checkpoint(run_dir), checkpoint.resolve())
+
+    def test_checkpoint_retention_uses_generation_not_rolled_back_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            root = run_dir / "checkpoints"
+            names = (
+                "step_000000100_gen_000000",
+                "step_000000090_gen_000001",
+                "step_000000080_gen_000002",
+            )
+            for name in names:
+                path = root / name
+                path.mkdir(parents=True)
+                (path / "COMPLETE").touch()
+            self.assertEqual(next_checkpoint_generation(run_dir), 3)
+            prune_full_checkpoints(run_dir, keep=2)
+            self.assertFalse((root / names[0]).exists())
+            self.assertTrue((root / names[1]).exists())
+            self.assertTrue((root / names[2]).exists())
 
 
 if __name__ == "__main__":

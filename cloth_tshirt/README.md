@@ -17,6 +17,7 @@
 | 固定评估 | validation 32、test 64、typical single motions 4 |
 | 网络 | full-state MLP；输入为当前质量预条件残差、上一残差、上一更新；输出完整位置增量并硬门控固定点 |
 | 默认网络 | ReLU、depth 1、width 2048、无 bias、float64、Adam `1e-4`、gradient clip 10 |
+| 双卡正式网络 | ReLU、depth 1、width 39936、无 bias、float32、2-rank tensor parallel、pool 512、batch 32 |
 | K buckets | `[1, 3, 10, 30]` |
 | 快速验证 | 每物理帧固定 15 次 learned updates，不提前停止 |
 | checkpoint validation / 最终 validation / test | 每物理帧固定 50 次，不提前停止；`1e-3` 只作为统计阈值 |
@@ -123,6 +124,35 @@ python cloth06_probe_memory_and_throughput.py \
 
 完整 CLI 配置会打印到终端，并写入 `memory_probe.json` 和 `recommended_training_config.json` 的 `configuration` 字段；`memory_probe.json`/`memory_probe.csv` 的每个结果也会重复记录网络规格、pool size 和该次实际 batch size。推荐文件按显存阈值内 `motions_per_second` 最高的结果给出 `recommended_batch_size`，并一并保存网络类型、宽度、深度、激活、bias、消息传递轮数和 pool size，便于确认显存测试与正式训练完全一致。
 
+### 双卡 tensor parallel：确定 `1 × 39936` MLP
+
+T-shirt 的完整状态维数为 `4424 × 3 = 13272`，MLP 拼接当前残差、上一残差和上一更新后的输入维数为 `39816`。`39936 / 39816 = 1.003`，既略宽于输入，又能被两个 tensor-parallel rank 整除。在 `cloth_opter` 环境中复现实测配置：
+
+```bash
+python cloth20_probe_dual_gpu_tensor_parallel.py \
+  --output-dir cloth_tshirt_pipeline/profiling/tp_width_39936_pool512_batch32 \
+  --fixed-data-dir fixed_data \
+  --devices 0 1 \
+  --dtype float32 \
+  --seed 42 \
+  --activation relu \
+  --width 39936 \
+  --no-use-bias \
+  --pool-size 512 \
+  --batch-size 32 \
+  --warmup-updates 1 \
+  --measured-updates 10 \
+  --memory-headroom-fraction 0.95
+```
+
+脚本由当前 Python 自动启动两个 `torchrun` rank，并使用 PyTorch DTensor 的 `ColwiseParallel` 切分隐藏层、`RowwiseParallel` 切分输出层。模型先在 `meta` device 上建立结构，再只物化每张卡自己的权重 shard，不会先在任一卡创建完整网络。两个 rank 的在线 pool batch 由 rank 0 广播，确保 tensor-parallel 两侧看到完全相同的输入。
+
+`1 × 39936` 共 `2,120,122,368` 个参数，每张卡持有 `1,060,061,184` 个参数；float32 下每卡权重、梯度和两个 Adam 状态的静态估算为 `15.80 GiB`。探测仍执行完整的 `ask → physics residual/model → energy → backward → 全局梯度裁剪 → Adam → tell/reset`，分别记录两张卡的峰值到 `worker_rank_00.json`、`worker_rank_01.json`，汇总写入 `memory_probe.json`。
+
+在本仓库记录的 `2 × RTX 3090 24 GB`、PyTorch `2.13.0+cu130` 环境中，上述配置实测最大峰值 reserved 为 `22.08 GiB`，约占单卡显存 `93.73%`，吞吐为 `42.20 motions/s`。相同 pool/batch 下的 width `40960` 达到 `22.64 GiB`、约 `96.1%`，超过 `95%` 阈值，因此正式配置固定为 `39936`，不要把探测通过解释成还能继续增加 batch 或 width。
+
+为避免完整大矩阵正交 QR 在切分前制造不可接受的临时显存，探测和正式训练共用 `cloth_tensor_parallel.py`：按全局 fan-in 缩放分别初始化本地隐藏层 shard，输出层仍为零初始化。正式训练前建议让同一配置连续跑至少 500 updates，检查 reserved 是否稳定、两 rank 指标是否一致、无 OOM/NaN、pool reset 原因是否合理；这一步通过后不要再改网络、pool、batch、dtype 或 PyTorch 版本。
+
 ## 3. 在线训练
 
 ```bash
@@ -143,6 +173,73 @@ python cloth05_train_online.py \
 训练正常结束或收到 `Ctrl-C` 时都会保存 `latest_checkpoint.pt`；后者可用 `--resume` 恢复，包括在线采样 RNG 和 pool。训练结束会自动调用 `cloth11_plot_training_progress.py`，统一绘制 loss、残差比、梯度裁剪、pool reset 和两种验证曲线。
 
 快速验证使用全部 32 个冻结 validation motions、32 帧、每帧固定 15 步；checkpoint validation 使用同样 32 个初值、100 帧、每帧固定 50 步。只有后者按“失败数优先”的字典序选择 `best_validation_model.pt`。达到残差比 `1e-3` 只记入 `converged_frame_count/fraction`，不会结束该帧的迭代。
+
+### 双卡 `1 × 39936` 正式训练
+
+显存候选、500-update soak、checkpoint/resume smoke、完整学习率 sweep、float32 精度分析和最终参数选择记录见 [`document/TENSOR_PARALLEL_MEMORY_AND_LR_SELECTION.md`](document/TENSOR_PARALLEL_MEMORY_AND_LR_SELECTION.md)。
+
+`cloth21_train_tensor_parallel_online.py` 是与上面 probe 同实现的正式入口。它由当前 Python 自动启动两个 `torchrun` worker，因此应先激活实测使用的 `cloth_opter` 环境，然后从本目录运行：
+
+```bash
+python cloth21_train_tensor_parallel_online.py \
+  --fixed-data-dir fixed_data \
+  --devices 0 1 \
+  --dtype float32 \
+  --seed 42 \
+  --activation relu \
+  --width 39936 \
+  --no-use-bias \
+  --pool-size 512 \
+  --batch-size 32 \
+  --max-wall-hours 10
+```
+
+默认输出目录为 `cloth_tshirt_pipeline/tensor_parallel/activation_relu_depth_01_width_39936_no_bias/seed_42`。两个 rank 都执行同一份 physics、pool、loss 和冻结 validation，rank 0 广播每个训练 batch；大权重、梯度和 Adam 状态由 DTensor 分片。每个日志区间会交叉检查两 rank 的 loss、残差比和 pool 计数，validation 也会检查两侧数值一致，只有 rank 0 写 CSV、图和 validation 结果。
+
+快速 validation 默认每 10000 updates 运行；完整 checkpoint validation 默认每 50000 updates 运行并按稳定性优先的字典序选 best。`Ctrl-C`/`SIGTERM` 会先在两个 rank 间同步停止请求，完成当前安全边界后写可恢复 checkpoint。若作业调度器会直接发送 `SIGKILL`，无法执行收尾保存，只能回到上一个周期 checkpoint。
+
+#### 分片 checkpoint 与恢复
+
+正式入口使用 PyTorch Distributed Checkpoint（DCP），不会在任一卡或 CPU 上聚合完整的 21 亿参数状态：
+
+- `latest.json` 原子指向最新的完整训练 checkpoint；
+- `checkpoints/step_XXXXXXXXX_gen_XXXXXX/distributed/` 保存各 rank 的模型和 Adam shard；
+- 同目录的 `runtime_rank_00.pt`、`runtime_rank_01.pt` 保存各 rank 的在线 pool、采样 RNG、Torch RNG、update、累计用时和 best 选择状态；
+- 只有写完 `manifest.json` 和 `COMPLETE` 后，临时目录才会原子发布并更新 `latest.json`；不完整目录不会被恢复；
+- 默认只保留最近 2 个完整 checkpoint；`best.json` 指向完整 validation 选出的 model-only DCP，并只保留 1 份 best。
+
+一个完整 checkpoint 约含 `7.90 GiB` 权重和 `15.80 GiB` Adam 状态，另有两个 pool sidecar；model-only best 约 `7.90 GiB`。默认保留策略在轮换瞬间需要同时容纳旧的 2 份和正在写的新 checkpoint，建议至少预留约 `80 GiB` 可用磁盘。可用 `--keep-checkpoints 1` 降低占用，但会减少回退余量。
+
+从 `latest.json` 恢复时必须使用同一 run dir 和相同的 mesh、dtype、网络、pool/K buckets、两 rank 拓扑以及完全相同的 PyTorch 版本：
+
+```bash
+python cloth21_train_tensor_parallel_online.py \
+  --run-dir cloth_tshirt_pipeline/tensor_parallel/activation_relu_depth_01_width_39936_no_bias/seed_42 \
+  --fixed-data-dir fixed_data --devices 0 1 \
+  --dtype float32 --activation relu --width 39936 --no-use-bias \
+  --pool-size 512 --batch-size 32 \
+  --max-wall-hours 20 --resume
+```
+
+`--max-wall-hours` 是包含已保存累计用时的总预算；例如第一段预算 10 小时已经用完，续跑时要把它提高到 20 小时。也可用 `--resume-checkpoint /absolute/path/to/checkpoints/step_...` 明确回退。DCP 目录不是旧单卡脚本所用的 `.pt` 文件，现有 `cloth07_evaluate_checkpoint.py` 和 `cloth13_inference.py` 不能直接读取；训练期间的双卡 validation 已由 `cloth21` 完成，后续独立评估需要继续通过两 rank DTensor loader 运行。
+
+500-update soak 通过后、正式长任务前，再用目标 GPU 做一次最短的 checkpoint/resume 验收（关闭耗时 validation）：
+
+```bash
+python cloth21_train_tensor_parallel_online.py \
+  --run-dir cloth_tshirt_pipeline/profiling/tp_checkpoint_smoke \
+  --fixed-data-dir fixed_data --devices 0 1 \
+  --max-updates 2 --checkpoint-interval 2 --keep-checkpoints 1 \
+  --skip-initial-validation --skip-final-validation --no-save-best-model
+
+python cloth21_train_tensor_parallel_online.py \
+  --run-dir cloth_tshirt_pipeline/profiling/tp_checkpoint_smoke \
+  --fixed-data-dir fixed_data --devices 0 1 \
+  --max-updates 3 --checkpoint-interval 2 --keep-checkpoints 1 \
+  --skip-initial-validation --skip-final-validation --no-save-best-model --resume
+```
+
+第二条命令应明确打印从 update 2 恢复，并继续写到 update 3；这同时验证当前两张 GPU、NCCL、DTensor、Adam shard 和目标磁盘文件系统，而不只是验证 Python 接口。恢复时若日志中存在晚于 checkpoint 的未保存 update，原日志会先备份到 `resume_audit/`，再截断到一致的 update，避免重复曲线。
 
 ## 4. 完整验证和测试
 
