@@ -89,7 +89,7 @@ class PipelineContractTests(unittest.TestCase):
         _validate_controller_args(args)
         row = _row_configuration(args, batch_size=4)
         self.assertEqual(row["model_type"], "gnn")
-        self.assertEqual(row["message_passing_steps"], 15)
+        self.assertEqual(row["message_passing_steps"], 5)
         self.assertEqual(row["width"], 128)
 
     def test_memory_probe_rejects_nonbaseline_gnn_shape(self) -> None:
@@ -119,7 +119,7 @@ class PipelineContractTests(unittest.TestCase):
             "depth": 2,
             "width": 128,
             "use_bias": False,
-            "message_passing_steps": 15,
+            "message_passing_steps": 5,
             "peak_reserved_fraction": 0.5,
             "peak_reserved_gib": 12.0,
             "motions_per_second": 20.0,

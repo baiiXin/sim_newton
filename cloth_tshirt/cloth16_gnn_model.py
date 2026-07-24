@@ -11,7 +11,7 @@ import torch.nn as nn
 
 
 DEFAULT_GNN_WIDTH = 128
-DEFAULT_MESSAGE_PASSING_STEPS = 15
+DEFAULT_MESSAGE_PASSING_STEPS = 5
 
 
 @dataclass(frozen=True)
@@ -51,13 +51,43 @@ class GNNModelSpec:
 class _TwoLayerReLU(nn.Module):
     """Two linear layers, with ReLU after both layers."""
 
-    def __init__(self, input_dim: int, width: int, *, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        width: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
         super().__init__()
         self.linear1 = nn.Linear(input_dim, width, bias=False, dtype=dtype, device=device)
         self.linear2 = nn.Linear(width, width, bias=False, dtype=dtype, device=device)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return torch.relu(self.linear2(torch.relu(self.linear1(value))))
+
+
+class _TwoLayerResidualBranch(nn.Module):
+    """Two linear layers with a linear output suitable for a zero-init branch.
+
+    Keeping the final layer linear is important: a zero-initialized linear
+    layer followed by ReLU has zero derivative and can never start learning.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        width: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        super().__init__()
+        self.linear1 = nn.Linear(input_dim, width, bias=False, dtype=dtype, device=device)
+        self.linear2 = nn.Linear(width, width, bias=False, dtype=dtype, device=device)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.linear2(torch.relu(self.linear1(value)))
 
 
 class _TwoLayerDecoder(nn.Module):
@@ -110,7 +140,7 @@ class LearnedOptimizerGNN(nn.Module):
         self.edge_mlp = _TwoLayerReLU(
             2 * self.width, self.width, dtype=physics.dtype, device=physics.device
         )
-        self.node_mlp = _TwoLayerReLU(
+        self.node_mlp = _TwoLayerResidualBranch(
             2 * self.width, self.width, dtype=physics.dtype, device=physics.device
         )
         self.decoder = _TwoLayerDecoder(self.width, dtype=physics.dtype, device=physics.device)

@@ -61,7 +61,7 @@ class TShirtGNNTests(unittest.TestCase):
         spec = GNNModelSpec()
         self.assertEqual(spec.width, 128)
         self.assertEqual(spec.depth, 2)
-        self.assertEqual(spec.message_passing_steps, 15)
+        self.assertEqual(spec.message_passing_steps, 5)
         self.assertEqual(GNN_MESSAGE_PASSING_STEPS, DEFAULT_MESSAGE_PASSING_STEPS)
         self.assertFalse(spec.use_bias)
         self.assertIs(self.model.edge_mlp, self.model.edge_mlp)
@@ -79,6 +79,23 @@ class TShirtGNNTests(unittest.TestCase):
         self.assertEqual(tuple(delta.shape), (2, 12))
         self.assertEqual(tuple(current.shape), (2, 12))
         torch.testing.assert_close(delta, torch.zeros_like(delta))
+
+    def test_zero_initialized_processor_branch_can_start_learning(self) -> None:
+        # The decoder learns on the first optimizer step.  Once it is nonzero,
+        # gradients must reach the zero-initialized node residual branch and
+        # then the edge-message MLP.
+        edge_weight_before = self.model.edge_mlp.linear2.weight.detach().clone()
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=1e-2)
+        for _ in range(3):
+            optimizer.zero_grad(set_to_none=True)
+            delta, _ = self.model(self.y, self.q, self.fixed)
+            ((delta + 1.0) ** 2).mean().backward()
+            optimizer.step()
+        self.assertGreater(float(self.model.node_mlp.linear2.weight.detach().norm()), 0.0)
+        self.assertGreater(
+            float((self.model.edge_mlp.linear2.weight.detach() - edge_weight_before).norm()),
+            0.0,
+        )
 
     def test_decoder_output_has_no_relu_or_scale(self) -> None:
         self.model.decoder = _NegativeDecoder()

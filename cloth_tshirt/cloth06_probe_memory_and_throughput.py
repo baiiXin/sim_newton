@@ -20,7 +20,7 @@ SUPPORTED_ACTIVATIONS = ("identity", "relu", "gelu", "silu", "tanh")
 SUPPORTED_MODEL_TYPES = ("mlp", "gnn")
 DEFAULT_BATCH_SIZES = (4, 8, 16, 32, 64, 128)
 K_BUCKET_COUNT = 4
-GNN_MESSAGE_PASSING_STEPS = 15
+GNN_MESSAGE_PASSING_STEPS = 5
 
 
 def parse_args() -> argparse.Namespace:

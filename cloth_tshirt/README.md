@@ -112,7 +112,7 @@ python cloth06_probe_memory_and_throughput.py \
 
 | 参数 | 默认值 | 含义与约束 |
 |---|---:|---|
-| `--model-type` | `mlp` | 待测试的网络类型，可选 `mlp/gnn`；GNN 基线固定使用 ReLU、depth 2、无 bias 和 15 轮消息传递 |
+| `--model-type` | `mlp` | 待测试的网络类型，可选 `mlp/gnn`；GNN 基线固定使用 ReLU、depth 2、无 bias 和 5 轮消息传递 |
 | `--activation` | `relu` | 隐藏层激活，可选 `identity/relu/gelu/silu/tanh` |
 | `--depth` | `1` | 隐藏线性层数量，必须为正整数 |
 | `--width` | `2048` | 每个隐藏层的宽度，必须为正整数 |
