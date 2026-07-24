@@ -120,6 +120,7 @@ def plot_residual(data: dict[str, np.ndarray], fields: list[str], output: Path) 
 def render_mp4(
     *,
     positions: np.ndarray,
+    camera_positions: np.ndarray | None = None,
     faces: np.ndarray,
     fixed_indices: np.ndarray,
     output: Path,
@@ -168,8 +169,21 @@ def render_mp4(
         radius=0.012,
     )
 
-    minimum = np.min(positions, axis=(0, 1))
-    maximum = np.max(positions, axis=(0, 1))
+    camera_reference = (
+        positions if camera_positions is None else np.asarray(camera_positions)
+    )
+    if (
+        camera_reference.ndim != 3
+        or camera_reference.shape[1:] != positions.shape[1:]
+        or camera_reference.shape[0] == 0
+        or not np.isfinite(camera_reference).all()
+    ):
+        raise ValueError(
+            "camera_positions must be a non-empty finite trajectory with the "
+            "same [N,3] vertex shape as positions"
+        )
+    minimum = np.min(camera_reference, axis=(0, 1))
+    maximum = np.max(camera_reference, axis=(0, 1))
     center = 0.5 * (minimum + maximum)
     extent = max(float(np.max(maximum - minimum)), 1.0e-3)
     camera = center + extent * np.asarray((1.35, 0.55, 1.55))
@@ -224,6 +238,7 @@ def render_mp4(
         "resolution": [width, height],
         "fps": fps,
         "rendered_frame_count": int(len(positions)),
+        "camera_reference_frame_count": int(len(camera_reference)),
         "video_duration_seconds": float(len(positions) / fps),
         "ffmpeg": ffmpeg,
         "crf": crf,

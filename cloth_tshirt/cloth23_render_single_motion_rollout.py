@@ -31,6 +31,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fixed-data-dir", type=Path, default=DEFAULT_FIXED_DATA_DIR)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument(
+        "--frame-hold",
+        type=int,
+        default=1,
+        help="repeat each saved state this many times in the MP4",
+    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--video-crf", type=int, default=18)
@@ -44,8 +50,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-video", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
-    if args.fps <= 0 or args.frame_stride <= 0:
-        parser.error("--fps and --frame-stride must be positive")
+    if args.fps <= 0 or args.frame_stride <= 0 or args.frame_hold <= 0:
+        parser.error("--fps, --frame-stride, and --frame-hold must be positive")
     if args.width <= 0 or args.height <= 0:
         parser.error("--width and --height must be positive")
     if not 0 <= args.video_crf <= 51:
@@ -126,7 +132,7 @@ def plot_diagnostics(
         label="energy after - before",
     )
     axes[1].axhline(0.0, color="black", ls="--", lw=1)
-    axes[0].set(ylabel="first-step residual ratio", title="Learned update behavior")
+    axes[0].set(ylabel="first-step residual ratio", title="First update and energy behavior")
     axes[1].set(xlabel="physical frame", ylabel="energy change")
     for axis in axes:
         axis.grid(True, which="both", alpha=0.25)
@@ -259,7 +265,12 @@ def plot_keyframes(
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     rollout_dir = args.rollout_dir.resolve()
-    result_dir = rollout_dir / "network" if (rollout_dir / "network").is_dir() else rollout_dir
+    if (rollout_dir / "network").is_dir():
+        result_dir = rollout_dir / "network"
+    elif (rollout_dir / "newton").is_dir():
+        result_dir = rollout_dir / "newton"
+    else:
+        result_dir = rollout_dir
     curves_path = result_dir / "curves.npz"
     trajectory_path = result_dir / "trajectory.npz"
     metrics_path = result_dir / "metrics.json"
@@ -316,6 +327,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         faces=mesh.faces,
         fixed_indices=fixed_indices,
         output=keyframes,
+        title=str(
+            metrics.get(
+                "visualization_title",
+                "Tensor-parallel MLP: typical 0 rollout",
+            )
+        ),
     )
     plots.append(keyframes)
 
@@ -328,7 +345,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             not bool(os.environ.get("DISPLAY")) if args.headless is None else args.headless
         )
         render = render_mp4(
-            positions=positions,
+            positions=np.repeat(positions, args.frame_hold, axis=0),
             faces=mesh.faces,
             fixed_indices=fixed_indices,
             output=video,
@@ -370,6 +387,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 else {
                     **render,
                     "frame_stride": args.frame_stride,
+                    "frame_hold": args.frame_hold,
                     "video": str(video),
                     "final_frame": str(poster),
                 }

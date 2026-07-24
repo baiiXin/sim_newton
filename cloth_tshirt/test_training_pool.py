@@ -17,6 +17,8 @@ if torch is not None:
         training_step,
     )
     from cloth09_rollout_single_motion import SingleMotionSettings, run_solver_rollout
+    from cloth25_rollout_newton_single_motion import _minimum_residual
+    from cloth26_rollout_newton_best_iterate import _initial_iterate
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed in this runtime")
@@ -122,6 +124,69 @@ class TrainingPoolTests(unittest.TestCase):
         self.assertEqual(result.summary["line_search_rejected_step_count"], 3)
         self.assertEqual(int(result.curves["inner_steps"][0]), 3)
         self.assertFalse(result.summary["failed"])
+
+    def test_preconditioned_minres_solves_spd_system(self) -> None:
+        diagonal = torch.tensor((2.0, 5.0), dtype=torch.float64)
+        right_hand_side = torch.tensor((2.0, -5.0), dtype=torch.float64)
+        result = _minimum_residual(
+            hvp=lambda value: diagonal * value,
+            preconditioner=lambda value: value / diagonal,
+            right_hand_side=right_hand_side,
+            max_iterations=4,
+            relative_tolerance=1e-12,
+            absolute_tolerance=1e-14,
+        )
+        self.assertTrue(result.converged)
+        self.assertFalse(result.breakdown)
+        torch.testing.assert_close(
+            result.step,
+            torch.tensor((1.0, -1.0), dtype=torch.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_minres_solves_indefinite_system(self) -> None:
+        diagonal = torch.tensor((2.0, -3.0, 5.0), dtype=torch.float64)
+        right_hand_side = torch.tensor((1.0, -2.0, 3.0), dtype=torch.float64)
+        result = _minimum_residual(
+            hvp=lambda value: diagonal * value,
+            preconditioner=lambda value: value,
+            right_hand_side=right_hand_side,
+            max_iterations=10,
+            relative_tolerance=1e-12,
+            absolute_tolerance=1e-14,
+        )
+        self.assertTrue(result.converged)
+        self.assertFalse(result.breakdown)
+        self.assertLess(result.minimum_curvature, 0.0)
+        torch.testing.assert_close(
+            diagonal * result.step,
+            right_hand_side,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_inertia_initial_iterate_preserves_free_velocity(self) -> None:
+        positions = self.physics.rest_positions.unsqueeze(0).clone()
+        velocities = torch.ones_like(positions)
+        fixed_targets = positions.clone()
+        guess = _initial_iterate(
+            physics=self.physics,
+            positions=positions,
+            velocities=velocities,
+            fixed_targets=fixed_targets,
+            mode="inertia",
+        )
+        expected = self.physics.project_positions(
+            positions + self.physics.dt * velocities,
+            fixed_targets,
+        )
+        torch.testing.assert_close(guess, expected)
+        _, next_velocities = self.physics.advance_state(
+            positions, guess, fixed_targets
+        )
+        gate = self.physics.free_update_gate(1, dtype=positions.dtype)
+        torch.testing.assert_close(next_velocities, velocities * gate)
 
 
 if __name__ == "__main__":
